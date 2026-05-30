@@ -111,10 +111,10 @@ namespace JonPlayer
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (_isUserDraggingSlider || _decoder == null || !_decoder.IsRunning) return;
                 _isUpdatingFromPlayer = true;
-                double val = ratio * 1000.0;
-                SliderTimeline.Value = val;
-                if (SliderTimelineFS != null) SliderTimelineFS.Value = val;
+                SliderTimeline.Value = ratio * SliderTimeline.Maximum;
+                if (SliderTimelineFS != null) SliderTimelineFS.Value = SliderTimeline.Value;
                 _isUpdatingFromPlayer = false;
             }));
         }
@@ -123,14 +123,11 @@ namespace JonPlayer
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                string ct = current.ToString(@"hh\:mm\:ss");
-                string tt = total.ToString(@"hh\:mm\:ss");
-
-                TxtCurrentTime.Text = ct;
-                if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = ct;
-
-                TxtTotalTime.Text = tt;
-                if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = tt;
+                if (_decoder == null || !_decoder.IsRunning) return;
+                TxtCurrentTime.Text = current.ToString(@"hh\:mm\:ss");
+                TxtTotalTime.Text = total.ToString(@"hh\:mm\:ss");
+                if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = TxtCurrentTime.Text;
+                if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = TxtTotalTime.Text;
             }));
         }
 
@@ -367,11 +364,16 @@ namespace JonPlayer
             PlayFile(files[0]);
         }
 
+        private string? _currentFilePath;
+
         private void PlayFile(string path)
         {
+            _currentFilePath = path;
             if (_decoder == null) return;
             try
             {
+                _decoder.PlaybackFinished -= Decoder_PlaybackFinished;
+                _decoder.PlaybackFinished += Decoder_PlaybackFinished;
                 _decoder.Open(path);
                 _decoder.Play();
 
@@ -379,6 +381,7 @@ namespace JonPlayer
                 TxtNowPlaying.Text = name;
                 Title = $"JonPlayer — {name}";
 
+                if (VideoElement != null) VideoElement.Visibility = Visibility.Visible;
                 if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
 
                 UpdatePlayPauseUI(true);
@@ -394,6 +397,7 @@ namespace JonPlayer
         {
             _decoder?.Stop();
             UpdatePlayPauseUI(false);
+            if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
             if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
             _isUpdatingFromPlayer = true;
             SliderTimeline.Value = 0;
@@ -417,6 +421,13 @@ namespace JonPlayer
             }
             else
             {
+                if (!_decoder.IsRunning)
+                {
+                    if (!string.IsNullOrEmpty(_currentFilePath))
+                        PlayFile(_currentFilePath);
+                    return;
+                }
+                
                 _decoder.Play();
                 UpdatePlayPauseUI(true);
             }
@@ -425,8 +436,16 @@ namespace JonPlayer
         private void UpdatePlayPauseUI(bool isPlaying)
         {
             var geom = (Geometry)FindResource(isPlaying ? "PauseIcon" : "PlayIcon");
-            if (PlayPauseIconPath != null) PlayPauseIconPath.Data = geom;
-            if (PlayPauseIconPathFS != null) PlayPauseIconPathFS.Data = geom;
+            if (PlayPauseIconPath != null)
+            {
+                PlayPauseIconPath.Data = geom;
+                PlayPauseIconPath.Margin = isPlaying ? new Thickness(0) : new Thickness(2,0,0,0);
+            }
+            if (PlayPauseIconPathFS != null)
+            {
+                PlayPauseIconPathFS.Data = geom;
+                PlayPauseIconPathFS.Margin = isPlaying ? new Thickness(0) : new Thickness(2,0,0,0);
+            }
 
             BtnPlayPause.ToolTip = isPlaying ? "Pause (Space)" : "Play (Space)";
             if (BtnPlayPauseFS != null) BtnPlayPauseFS.ToolTip = isPlaying ? "Pause" : "Play";
@@ -434,11 +453,16 @@ namespace JonPlayer
 
         private void SeekRelative(double offsetSeconds)
         {
-            // Not supported via precise relative calculations here easily, but we can do a seek simulation
-            // Typically slider holds 0..1000. Let's do slider relative seek
-            double current = SliderTimeline.Value;
-            double target = Math.Clamp(current + (offsetSeconds * 10), 0, 1000);
-            _decoder?.Seek(target / 1000.0);
+            if (_decoder == null || !_decoder.IsRunning) return;
+            if (TimeSpan.TryParse(TxtTotalTime.Text, out TimeSpan total))
+            {
+                double totalSeconds = total.TotalSeconds;
+                if (totalSeconds <= 0) return;
+                double currentRatio = SliderTimeline.Value / 1000.0;
+                double currentSeconds = currentRatio * totalSeconds;
+                double targetSeconds = Math.Clamp(currentSeconds + offsetSeconds, 0, totalSeconds);
+                _decoder.Seek(targetSeconds / totalSeconds);
+            }
         }
 
         private void BtnSpeed_Click(object sender, RoutedEventArgs e)
@@ -465,17 +489,68 @@ namespace JonPlayer
             }
         }
 
-        private void SliderTimeline_PreviewMouseDown(object sender, MouseButtonEventArgs e) => _isUserDraggingSlider = true;
-        private void SliderTimeline_PreviewMouseUp(object sender, MouseButtonEventArgs e)
+        private void SliderTimeline_PreviewMouseDown(object sender, MouseButtonEventArgs e)
         {
-            _isUserDraggingSlider = false;
-            DoSeek(SliderTimeline.Value);
+            if (e.OriginalSource is System.Windows.Controls.Primitives.Thumb)
+            {
+                _isUserDraggingSlider = true;
+                return;
+            }
+
+            if (sender is Slider slider)
+            {
+                double ratio = e.GetPosition(slider).X / slider.ActualWidth;
+                double targetValue = Math.Clamp(ratio * slider.Maximum, 0, slider.Maximum);
+                
+                _isUserDraggingSlider = true;
+                slider.Value = targetValue;
+                DoSeek(targetValue);
+                _isUserDraggingSlider = false;
+
+                e.Handled = true;
+            }
         }
 
-        private void SliderTimelineFS_PreviewMouseUp(object sender, MouseButtonEventArgs e)
+        private void SliderTimeline_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
         {
             _isUserDraggingSlider = false;
-            DoSeek(SliderTimelineFS.Value);
+            if (sender is Slider slider) DoSeek(slider.Value);
+        }
+
+        private void SliderTimelineFS_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.OriginalSource is System.Windows.Controls.Primitives.Thumb)
+            {
+                _isUserDraggingSlider = true;
+                return;
+            }
+
+            if (sender is Slider slider)
+            {
+                double ratio = e.GetPosition(slider).X / slider.ActualWidth;
+                double targetValue = Math.Clamp(ratio * slider.Maximum, 0, slider.Maximum);
+                
+                _isUserDraggingSlider = true;
+                slider.Value = targetValue;
+                DoSeek(targetValue);
+                _isUserDraggingSlider = false;
+
+                e.Handled = true;
+            }
+        }
+
+        private void SliderTimelineFS_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+        {
+            _isUserDraggingSlider = false;
+            if (sender is Slider slider) DoSeek(slider.Value);
+        }
+
+        private void Decoder_PlaybackFinished()
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                BtnStop_Click(this, new RoutedEventArgs());
+            }));
         }
 
         private void SliderTimeline_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)

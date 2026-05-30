@@ -24,10 +24,12 @@ namespace JonPlayer
         private bool _isPaused;
 
         private readonly object _lock = new object();
+        public bool IsRunning => _isRunning;
 
         public event Action<IntPtr, int, int, int>? FrameDecoded;
         public event Action<double>? PositionChanged; // 0.0 to 1.0 ratio
         public event Action<TimeSpan, TimeSpan>? TimeUpdated; // Current, Total
+        public event Action? PlaybackFinished;
 
         public int Width => _width;
         public int Height => _height;
@@ -177,6 +179,7 @@ namespace JonPlayer
 
             var stopwatch = new Stopwatch();
             double currentPlaybackPtsTime = 0;
+            double targetSeekMs = -1;
 
             while (_isRunning)
             {
@@ -194,12 +197,12 @@ namespace JonPlayer
                     if (_seekRequestRatio >= 0)
                     {
                         double targetSeconds = _seekRequestRatio * durationInSeconds;
-                        long targetPts = (long)(targetSeconds / ffmpeg.av_q2d(timeBase));
+                        long targetTimestamp = (long)(targetSeconds * ffmpeg.AV_TIME_BASE);
 
-                        ffmpeg.av_seek_frame(_formatContext, _videoStreamIndex, targetPts, ffmpeg.AVSEEK_FLAG_BACKWARD);
+                        ffmpeg.av_seek_frame(_formatContext, -1, targetTimestamp, ffmpeg.AVSEEK_FLAG_BACKWARD);
                         ffmpeg.avcodec_flush_buffers(_codecContext);
 
-                        currentPlaybackPtsTime = targetSeconds * 1000.0;
+                        targetSeekMs = targetSeconds * 1000.0;
                         stopwatch.Reset();
                         _seekRequestRatio = -1;
                     }
@@ -214,8 +217,13 @@ namespace JonPlayer
                 int readRes = ffmpeg.av_read_frame(_formatContext, _packet);
                 if (readRes < 0)
                 {
-                    _isFinished = true;
-                    _isPaused = true;
+                    if (!_isFinished)
+                    {
+                        _isFinished = true;
+                        _isPaused = true;
+                        PlaybackFinished?.Invoke();
+                    }
+                    Thread.Sleep(10);
                     continue;
                 }
 
@@ -227,6 +235,17 @@ namespace JonPlayer
                         while (ffmpeg.avcodec_receive_frame(_codecContext, _frame) >= 0)
                         {
                             double ptsTime = _frame->best_effort_timestamp * ffmpeg.av_q2d(timeBase) * 1000.0; // ms
+
+                            if (targetSeekMs >= 0)
+                            {
+                                if (ptsTime < targetSeekMs - 200) // Discard frames until we are within 200ms of target
+                                {
+                                    continue;
+                                }
+                                targetSeekMs = -1;
+                                currentPlaybackPtsTime = ptsTime;
+                                stopwatch.Restart();
+                            }
 
                             // Sync / Delay logic based on stopwatch and speed
                             if (!stopwatch.IsRunning)

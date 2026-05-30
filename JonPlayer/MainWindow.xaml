@@ -468,7 +468,15 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
-                    <Image Source="Assets/logo.png" Height="20" Stretch="Uniform" VerticalAlignment="Center"/>
+                    <Image Source="Assets/logo.png" Height="26" Stretch="Uniform" VerticalAlignment="Center"/>
+                    <TextBlock FontSize="15" FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"><Run Text="Jon" Foreground="White"/><Run Text="Player">
+                            <Run.Foreground>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                    <GradientStop Color="#00E5FF" Offset="0"/>
+                                    <GradientStop Color="#0066FF" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Run.Foreground>
+                        </Run></TextBlock>
                 </StackPanel>
                 <TextBlock x:Name="TxtNowPlaying" Grid.Column="1" Text="No file loaded" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="10,0"/>
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
@@ -479,9 +487,9 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="1" x:Name="VideoGrid" Background="#000000">
-            <Image x:Name="VideoElement" Stretch="Uniform"/>
-            <Image x:Name="ImgSplash" Source="Assets/logo.png" Stretch="Uniform" Visibility="Visible"/>
+        <Grid x:Name="VideoGrid" Grid.Row="1" Background="Black">
+            <Image x:Name="VideoElement" Stretch="Uniform" Visibility="Collapsed"/>
+            <Image x:Name="ImgSplash" Stretch="Uniform" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
 
             <Rectangle x:Name="MouseLayer" Fill="Transparent" IsHitTestVisible="True" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
 
@@ -516,19 +524,16 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock x:Name="TxtCurrentTimeFS" Grid.Column="0" Text="00:00:00" Foreground="#BBFFFFFF" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <Slider x:Name="SliderTimelineFS" Grid.Column="1" Style="{StaticResource FsTimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsMoveToPointEnabled="True" PreviewMouseLeftButtonDown="SliderTimeline_PreviewMouseDown" PreviewMouseLeftButtonUp="SliderTimelineFS_PreviewMouseUp" ValueChanged="SliderTimelineFS_ValueChanged" VerticalAlignment="Center"/>
+                        <Slider x:Name="SliderTimelineFS" Grid.Column="1" Style="{StaticResource FsTimelineSlider}" Minimum="0" Maximum="1000" Value="0" Thumb.DragCompleted="SliderTimelineFS_DragCompleted" PreviewMouseLeftButtonDown="SliderTimelineFS_PreviewMouseDown" ValueChanged="SliderTimelineFS_ValueChanged" VerticalAlignment="Center"/>
                         <TextBlock x:Name="TxtTotalTimeFS" Grid.Column="2" Text="00:00:00" Foreground="#BBFFFFFF" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </Grid>
                     <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <Button Grid.Column="0" Style="{StaticResource FsKnobButton}" ToolTip="Open File" Click="BtnOpen_Click">
-                            <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                        </Button>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Open File" Click="BtnOpen_Click">
+                                <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                            </Button>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <Button Style="{StaticResource FsKnobButton}" ToolTip="Rewind 10s" Click="BtnSkipBack_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource RewindIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
@@ -542,7 +547,7 @@
                                 <Path Data="{StaticResource ForwardIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
                         </StackPanel>
-                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                             <Button x:Name="BtnMuteFS" Style="{StaticResource FsKnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
                                 <Path x:Name="MuteIconPathFS" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
@@ -580,22 +585,19 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="TxtCurrentTime" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <Slider x:Name="SliderTimeline" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsMoveToPointEnabled="True" PreviewMouseLeftButtonDown="SliderTimeline_PreviewMouseDown" PreviewMouseLeftButtonUp="SliderTimeline_PreviewMouseUp" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
+                <Slider x:Name="SliderTimeline" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" Thumb.DragCompleted="SliderTimeline_DragCompleted" PreviewMouseLeftButtonDown="SliderTimeline_PreviewMouseDown" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
                 <TextBlock x:Name="TxtTotalTime" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
             </Grid>
         </Border>
 
         <Border Grid.Row="3" x:Name="ControlBar" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="0,1,0,0" Padding="14,8">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <Button Grid.Column="0" Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click">
-                    <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                </Button>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                    <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click">
+                        <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                    </Button>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Button Style="{StaticResource KnobButton}" ToolTip="Rewind 10s (←)" Click="BtnSkipBack_Click" Margin="0,0,6,0">
                         <Path Data="{StaticResource RewindIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
@@ -609,7 +611,7 @@
                         <Path Data="{StaticResource ForwardIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
                 </StackPanel>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                     <Button x:Name="BtnMute" Style="{StaticResource KnobButton}" ToolTip="Mute/Unmute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
                         <Path x:Name="MuteIconPath" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>

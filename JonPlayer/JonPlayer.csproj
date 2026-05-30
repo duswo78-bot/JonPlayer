@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\logo.png" />
+    <Resource Include="Assets\BG logo.png" />
   </ItemGroup>
 
   <ItemGroup>
