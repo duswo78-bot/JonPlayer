@@ -13,6 +13,7 @@ using System.Text;
 using Microsoft.Win32;
 using System.Windows.Shell;
 using System.Windows.Controls.Primitives;
+using System.Diagnostics;
 
 // ── Resolve WPF vs WinForms ambiguities ──────────────────
 using Size           = System.Windows.Size;
@@ -75,6 +76,18 @@ namespace JonPlayer
         private ResizeMode  _prevResizeMode;
 
         private DispatcherTimer _fsMousePollTimer;
+        private DispatcherTimer _statsTimer;
+
+        // Stats Overlay
+        private int _openCount = 0;
+        private int _seekCount = 0;
+        private Stopwatch _renderTimer = new Stopwatch();
+        private double _totalRenderTimeMs = 0;
+        private int _renderSamples = 0;
+        private TimeSpan _lastCpuTime;
+        private DateTime _lastCpuCheckTime;
+
+        private static string? _lastOpenDirectory;
 
         private bool _isMouseOverFsStrip;
         private bool _isMouseOverFsExitBadge;
@@ -83,26 +96,29 @@ namespace JonPlayer
         {
             InitializeComponent();
 
-            _renderer = new D3D11VideoRenderer();
-            VideoElement.Source = _renderer.D3DImage;
-
-            _decoder = new FFmpegVideoDecoder();
-            _decoder.FrameDecoded += Decoder_FrameDecoded;
-            _decoder.PositionChanged += Decoder_PositionChanged;
-            _decoder.TimeUpdated += Decoder_TimeUpdated;
-
             this.StateChanged += Window_StateChanged;
 
             _fsMousePollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
             _fsMousePollTimer.Tick += FsMousePollTimer_Tick;
+
+            _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _statsTimer.Tick += StatsTimer_Tick;
+
+            _lastCpuTime = Process.GetCurrentProcess().TotalProcessorTime;
+            _lastCpuCheckTime = DateTime.UtcNow;
 
             ApplyTheme(false);
         }
 
         private void Decoder_FrameDecoded(IntPtr bgraPointer, int width, int height, int stride)
         {
+            _renderTimer.Restart();
             _renderer?.ResetSize(width, height);
             _renderer?.RenderFrame(bgraPointer, stride);
+            _renderTimer.Stop();
+
+            _totalRenderTimeMs += _renderTimer.Elapsed.TotalMilliseconds;
+            _renderSamples++;
         }
 
         private void Decoder_PositionChanged(double ratio)
@@ -150,15 +166,8 @@ namespace JonPlayer
 
             if (e.ClickCount == 1 && _decoder != null)
             {
-                var pos = e.GetPosition(VideoGrid);
-                double ratio = pos.X / VideoGrid.ActualWidth;
-                ratio = Math.Clamp(ratio, 0, 1);
-                _decoder.Seek(ratio);
-
-                _isUpdatingFromPlayer = true;
-                SliderTimeline.Value = ratio * 1000.0;
-                if (SliderTimelineFS != null) SliderTimelineFS.Value = ratio * 1000.0;
-                _isUpdatingFromPlayer = false;
+                TogglePlayPause();
+                e.Handled = true;
             }
         }
 
@@ -344,9 +353,18 @@ namespace JonPlayer
             {
                 Title  = "Open Media File",
                 Filter = "Video Files (*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts)|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts|Audio Files (*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a)|*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|All Files (*.*)|*.*",
-                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
             };
-            if (dlg.ShowDialog() == true) PlayFile(dlg.FileName);
+            
+            if (!string.IsNullOrEmpty(_lastOpenDirectory))
+                dlg.InitialDirectory = _lastOpenDirectory;
+            else
+                dlg.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+
+            if (dlg.ShowDialog() == true)
+            {
+                _lastOpenDirectory = Path.GetDirectoryName(dlg.FileName);
+                PlayFile(dlg.FileName);
+            }
         }
 
         private void Window_DragOver(object sender, System.Windows.DragEventArgs e)
@@ -369,7 +387,22 @@ namespace JonPlayer
         private void PlayFile(string path)
         {
             _currentFilePath = path;
-            if (_decoder == null) return;
+            _openCount++;
+
+            if (_renderer == null)
+            {
+                _renderer = new D3D11VideoRenderer();
+                VideoElement.Source = _renderer.D3DImage;
+            }
+
+            if (_decoder == null)
+            {
+                _decoder = new FFmpegVideoDecoder();
+                _decoder.FrameDecoded += Decoder_FrameDecoded;
+                _decoder.PositionChanged += Decoder_PositionChanged;
+                _decoder.TimeUpdated += Decoder_TimeUpdated;
+            }
+
             try
             {
                 _decoder.PlaybackFinished -= Decoder_PlaybackFinished;
@@ -410,6 +443,16 @@ namespace JonPlayer
         }
         private void BtnSkipBack_Click    (object sender, RoutedEventArgs e) => SeekRelative(-10);
         private void BtnSkipForward_Click (object sender, RoutedEventArgs e) => SeekRelative( 10);
+        
+        private void BtnPrev_Click(object sender, RoutedEventArgs e)
+        {
+            WpfMessageBox.Show("플레이리스트 다중 재생 기능은 향후 업데이트될 예정입니다.", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private void BtnNext_Click(object sender, RoutedEventArgs e)
+        {
+            WpfMessageBox.Show("플레이리스트 다중 재생 기능은 향후 업데이트될 예정입니다.", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
 
         private void TogglePlayPause()
         {
@@ -462,6 +505,7 @@ namespace JonPlayer
                 double currentSeconds = currentRatio * totalSeconds;
                 double targetSeconds = Math.Clamp(currentSeconds + offsetSeconds, 0, totalSeconds);
                 _decoder.Seek(targetSeconds / totalSeconds);
+                _seekCount++;
             }
         }
 
@@ -575,6 +619,7 @@ namespace JonPlayer
         private void DoSeek(double sliderValue)
         {
             _decoder?.Seek(sliderValue / 1000.0);
+            _seekCount++;
         }
 
         private void SliderVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -678,13 +723,14 @@ namespace JonPlayer
         private void ExitFullscreen()
         {
             if (!_isFullscreen) return;
+            _isFullscreen = false;
 
             RowTitleBar.Height = new GridLength(40);
             RowTimeline.Height = GridLength.Auto;
             RowControls.Height = GridLength.Auto;
 
-            WindowState = _prevWindowState;
             WindowStyle = _prevWindowStyle;
+            WindowState = _prevWindowState;
             ResizeMode  = _prevResizeMode;
 
             if (WindowState == WindowState.Maximized)
@@ -698,19 +744,21 @@ namespace JonPlayer
                 BtnMaximize.ToolTip = "Maximize";
             }
 
-            WindowChrome.SetWindowChrome(this, new WindowChrome
+            try
             {
-                CaptionHeight         = 40,
-                ResizeBorderThickness = new Thickness(6),
-                GlassFrameThickness   = new Thickness(-1),
-                CornerRadius          = new CornerRadius(0)
-            });
+                WindowChrome.SetWindowChrome(this, new WindowChrome
+                {
+                    CaptionHeight         = 40,
+                    ResizeBorderThickness = new Thickness(6),
+                    GlassFrameThickness   = new Thickness(-1),
+                    CornerRadius          = new CornerRadius(0)
+                });
+            }
+            catch { }
 
             PopupFsExit.IsOpen = false;
             FsBottomStrip.Visibility = Visibility.Collapsed;
             _fsMousePollTimer.Stop();
-
-            _isFullscreen = false;
         }
 
         private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -726,6 +774,7 @@ namespace JonPlayer
                 case Key.Down: AdjustVolume(-5); e.Handled = true; break;
                 case Key.M: ToggleMute(); e.Handled = true; break;
                 case Key.F11: ToggleFullscreen(); e.Handled = true; break;
+                case Key.F3: ToggleStatsOverlay(); e.Handled = true; break;
                 case Key.Escape:
                     if (_isFullscreen) { ExitFullscreen(); e.Handled = true; }
                     break;
@@ -734,6 +783,101 @@ namespace JonPlayer
                     { OpenFile(); e.Handled = true; }
                     break;
             }
+        }
+
+        private void ToggleStatsOverlay()
+        {
+            if (OverlayStats.Visibility == Visibility.Visible)
+            {
+                OverlayStats.Visibility = Visibility.Collapsed;
+                _statsTimer.Stop();
+            }
+            else
+            {
+                OverlayStats.Visibility = Visibility.Visible;
+                if (_decoder != null && _decoder.IsPlaying) _statsTimer.Start();
+            }
+        }
+
+        private void StatsTimer_Tick(object? sender, EventArgs e)
+        {
+            if (_decoder == null) return;
+
+            var currentCpuTime = Process.GetCurrentProcess().TotalProcessorTime;
+            var currentCheckTime = DateTime.UtcNow;
+            var cpuUsedMs = (currentCpuTime - _lastCpuTime).TotalMilliseconds;
+            var totalMsPassed = (currentCheckTime - _lastCpuCheckTime).TotalMilliseconds;
+            
+            double cpuUsage = 0;
+            if (totalMsPassed > 0)
+                cpuUsage = (cpuUsedMs / (Environment.ProcessorCount * totalMsPassed)) * 100.0;
+
+            _lastCpuTime = currentCpuTime;
+            _lastCpuCheckTime = currentCheckTime;
+
+            var process = Process.GetCurrentProcess();
+            double memoryMb = process.WorkingSet64 / 1024.0 / 1024.0;
+            int totalThreads = process.Threads.Count;
+
+            double avgRender = 0;
+            if (_renderSamples > 0)
+            {
+                avgRender = _totalRenderTimeMs / _renderSamples;
+                _totalRenderTimeMs = 0;
+                _renderSamples = 0;
+            }
+
+            var stats = _decoder.GetStats();
+            string state = _decoder.IsPlaying ? "Playing" : "Paused";
+            if (!_decoder.IsRunning) state = "Stopped";
+
+            var sb = new StringBuilder();
+            
+            sb.AppendLine("Video");
+            sb.AppendLine("────────────────────");
+            var infoParts = stats.VideoInfo?.Split(' ');
+            string res = infoParts?.Length > 0 ? infoParts[0] : "";
+            string codec = infoParts?.Length > 1 ? infoParts[1] : "";
+            
+            sb.AppendLine($"{"Codec".PadRight(12)}{codec}");
+            sb.AppendLine($"{"Resolution".PadRight(12)}{res}");
+            sb.AppendLine($"{"FPS".PadRight(12)}{stats.ActualFps:F1} / {stats.TargetFps:F1}");
+            sb.AppendLine($"{"Dropped".PadRight(12)}0");
+            sb.AppendLine();
+            
+            sb.AppendLine("Performance");
+            sb.AppendLine("────────────────────");
+            sb.AppendLine($"{"Decode".PadRight(12)}{stats.AvgDecodeTimeMs:F1} ms");
+            sb.AppendLine($"{"Render".PadRight(12)}{avgRender:F1} ms");
+            sb.AppendLine($"{"Total".PadRight(12)}{(stats.AvgDecodeTimeMs + avgRender):F1} ms");
+            sb.AppendLine();
+            
+            sb.AppendLine("Buffer");
+            sb.AppendLine("────────────────────");
+            sb.AppendLine($"{"PacketQ".PadRight(12)}0");
+            sb.AppendLine($"{"FrameQ".PadRight(12)}0");
+            sb.AppendLine();
+            
+            sb.AppendLine("Sync");
+            sb.AppendLine("────────────────────");
+            sb.AppendLine($"{"Drift".PadRight(12)}{stats.SyncDelayMs:F0} ms");
+            sb.AppendLine($"{"LateFrames".PadRight(12)}{stats.LateFrames}");
+            sb.AppendLine();
+            
+            sb.AppendLine("System");
+            sb.AppendLine("────────────────────");
+            sb.AppendLine($"{"CPU".PadRight(12)}{cpuUsage:F1}%");
+            sb.AppendLine($"{"Memory".PadRight(12)}{memoryMb:F0} MB");
+            sb.AppendLine($"{"Threads".PadRight(12)}{totalThreads}");
+            sb.AppendLine();
+            
+            sb.AppendLine("Session");
+            sb.AppendLine("────────────────────");
+            sb.AppendLine($"{"State".PadRight(12)}{state}");
+            sb.AppendLine($"{"OpenCount".PadRight(12)}{_openCount}");
+            sb.Append($"{"SeekCount".PadRight(12)}{_seekCount}");
+
+            TxtOverlayStats.Text = sb.ToString();
         }
 
         private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)

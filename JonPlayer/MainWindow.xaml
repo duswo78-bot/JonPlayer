@@ -30,6 +30,8 @@
         <Geometry x:Key="StopIcon">M 6,6 H 18 V 18 H 6 Z</Geometry>
         <Geometry x:Key="RewindIcon">M 20,5 L 11,12 L 20,19 Z M 11,5 L 2,12 L 11,19 Z</Geometry>
         <Geometry x:Key="ForwardIcon">M 4,5 L 13,12 L 4,19 Z M 13,5 L 22,12 L 13,19 Z</Geometry>
+        <Geometry x:Key="PrevIcon">M 16,5 L 7,12 L 16,19 Z M 5,5 H 7 V 19 H 5 Z</Geometry>
+        <Geometry x:Key="NextIcon">M 8,5 L 17,12 L 8,19 Z M 17,5 H 19 V 19 H 17 Z</Geometry>
         <Geometry x:Key="OpenIcon">M 2,18 V 20 C 2,21.1 2.9,22 4,22 H 20 C 21.1,22 22,21.1 22,20 V 18 M 12,2 L 19,9 H 14 V 16 H 10 V 9 H 5 Z</Geometry>
         <Geometry x:Key="MuteIcon">M 19,12 L 22,9 L 20.6,7.6 L 17.6,10.6 L 14.6,7.6 L 13.2,9 L 16.2,12 L 13.2,15 L 14.6,16.4 L 17.6,13.4 L 20.6,16.4 L 22,15 Z M 3,9 V 15 H 7 L 12,20 V 4 L 7,9 Z</Geometry>
         <Geometry x:Key="VolumeLowIcon">M 3,9 V 15 H 7 L 12,20 V 4 L 7,9 H 3 Z M 16.5,12 C 16.5,10.2 15.5,8.7 14,8 V 16 C 15.5,15.3 16.5,13.8 16.5,12 Z</Geometry>
@@ -468,8 +470,8 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
-                    <Image Source="Assets/logo.png" Height="26" Stretch="Uniform" VerticalAlignment="Center"/>
-                    <TextBlock FontSize="15" FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"><Run Text="Jon" Foreground="White"/><Run Text="Player">
+                    <Image Source="Assets/logo.png" Height="26" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBlock FontSize="15" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"><Run Text="Jon" Foreground="White"/><Run Text="Player">
                             <Run.Foreground>
                                 <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                                     <GradientStop Color="#00E5FF" Offset="0"/>
@@ -477,6 +479,7 @@
                                 </LinearGradientBrush>
                             </Run.Foreground>
                         </Run></TextBlock>
+                    <Image Source="Assets/aptiv_logo.png" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
                 </StackPanel>
                 <TextBlock x:Name="TxtNowPlaying" Grid.Column="1" Text="No file loaded" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="10,0"/>
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
@@ -492,6 +495,10 @@
             <Image x:Name="ImgSplash" Stretch="Uniform" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
 
             <Rectangle x:Name="MouseLayer" Fill="Transparent" IsHitTestVisible="True" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
+
+            <Border x:Name="OverlayStats" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="10" Background="#CC000000" CornerRadius="5" IsHitTestVisible="False" Visibility="Collapsed" Panel.ZIndex="100">
+                <TextBlock x:Name="TxtOverlayStats" Foreground="#00FF00" FontFamily="Consolas" FontSize="12" LineHeight="18" Text="Stats..." />
+            </Border>
 
             <Popup x:Name="PopupFsExit" PlacementTarget="{Binding ElementName=VideoGrid}" Placement="Top" AllowsTransparency="True" StaysOpen="True">
                 <Border x:Name="FsExitBadge" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,14,0,0" Background="#CC000000" BorderBrush="#55FFFFFF" BorderThickness="1" CornerRadius="14" Padding="14,6" MouseEnter="FsExitBadge_MouseEnter" MouseLeave="FsExitBadge_MouseLeave">
@@ -534,6 +541,9 @@
                             </Button>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
+                                <Path Data="{StaticResource PrevIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                            </Button>
                             <Button Style="{StaticResource FsKnobButton}" ToolTip="Rewind 10s" Click="BtnSkipBack_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource RewindIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
@@ -543,8 +553,11 @@
                             <Button Style="{StaticResource FsKnobButton}" ToolTip="Stop" Click="BtnStop_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource StopIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Forward 10s" Click="BtnSkipForward_Click">
+                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Forward 10s" Click="BtnSkipForward_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource ForwardIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                            </Button>
+                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Next" Click="BtnNext_Click">
+                                <Path Data="{StaticResource NextIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
@@ -598,6 +611,9 @@
                     </Button>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
+                        <Path Data="{StaticResource PrevIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                    </Button>
                     <Button Style="{StaticResource KnobButton}" ToolTip="Rewind 10s (←)" Click="BtnSkipBack_Click" Margin="0,0,6,0">
                         <Path Data="{StaticResource RewindIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
@@ -607,8 +623,11 @@
                     <Button Style="{StaticResource KnobButton}" ToolTip="Stop" Click="BtnStop_Click" Margin="0,0,6,0">
                         <Path Data="{StaticResource StopIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Forward 10s (→)" Click="BtnSkipForward_Click">
+                    <Button Style="{StaticResource KnobButton}" ToolTip="Forward 10s (→)" Click="BtnSkipForward_Click" Margin="0,0,6,0">
                         <Path Data="{StaticResource ForwardIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                    </Button>
+                    <Button Style="{StaticResource KnobButton}" ToolTip="Next" Click="BtnNext_Click">
+                        <Path Data="{StaticResource NextIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">

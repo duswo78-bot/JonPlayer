@@ -7,6 +7,17 @@ using FFmpeg.AutoGen;
 
 namespace JonPlayer
 {
+    public struct DecoderStats
+    {
+        public string VideoInfo;
+        public double TargetFps;
+        public double ActualFps;
+        public double AvgDecodeTimeMs;
+        public double SyncDelayMs;
+        public int LateFrames;
+        public int ThreadCount;
+    }
+
     public unsafe class FFmpegVideoDecoder : IDisposable
     {
         private AVFormatContext* _formatContext;
@@ -43,8 +54,18 @@ namespace JonPlayer
         private double _playbackSpeed = 1.0;
 
         private bool _isFinished;
+        private bool _speedChanged;
+        private bool _isDisposed;
+
+        private DecoderStats _stats;
+        private int _framesDecodedThisSecond;
+        private DateTime _lastFpsCalcTime;
+        private double _totalDecodeTimeMs;
+        private int _decodeTimeSamples;
 
         public bool IsPlaying => _isRunning && !_isPaused;
+
+        public DecoderStats GetStats() => _stats;
 
         static FFmpegVideoDecoder()
         {
@@ -54,61 +75,81 @@ namespace JonPlayer
 
         public void Open(string path)
         {
+            if (_isDisposed) throw new ObjectDisposedException(nameof(FFmpegVideoDecoder));
             Stop();
 
             _currentPath = path;
 
-            fixed (AVFormatContext** pFormatContext = &_formatContext)
+            try
             {
-                if (ffmpeg.avformat_open_input(pFormatContext, path, null, null) < 0)
-                    throw new Exception("Could not open file");
-            }
-
-            if (ffmpeg.avformat_find_stream_info(_formatContext, null) < 0)
-                throw new Exception("Could not find stream info");
-
-            for (int i = 0; i < _formatContext->nb_streams; i++)
-            {
-                if (_formatContext->streams[i]->codecpar->codec_type == AVMediaType.AVMEDIA_TYPE_VIDEO)
+                fixed (AVFormatContext** pFormatContext = &_formatContext)
                 {
-                    _videoStreamIndex = i;
-                    break;
+                    if (ffmpeg.avformat_open_input(pFormatContext, path, null, null) < 0)
+                        throw new Exception("Could not open file");
                 }
+
+                if (ffmpeg.avformat_find_stream_info(_formatContext, null) < 0)
+                    throw new Exception("Could not find stream info");
+
+                for (int i = 0; i < _formatContext->nb_streams; i++)
+                {
+                    if (_formatContext->streams[i]->codecpar->codec_type == AVMediaType.AVMEDIA_TYPE_VIDEO)
+                    {
+                        _videoStreamIndex = i;
+                        break;
+                    }
+                }
+
+                if (_videoStreamIndex == -1)
+                    throw new Exception("Could not find video stream");
+
+                var codecParameters = _formatContext->streams[_videoStreamIndex]->codecpar;
+                var codec = ffmpeg.avcodec_find_decoder(codecParameters->codec_id);
+                _codecContext = ffmpeg.avcodec_alloc_context3(codec);
+
+                // Enable Multithreaded Decoding
+                _codecContext->thread_count = 0; // 0 = Auto-detect CPU cores
+                _codecContext->thread_type = ffmpeg.FF_THREAD_FRAME | ffmpeg.FF_THREAD_SLICE;
+
+                ffmpeg.avcodec_parameters_to_context(_codecContext, codecParameters);
+
+                if (ffmpeg.avcodec_open2(_codecContext, codec, null) < 0)
+                    throw new Exception("Could not open codec");
+
+                _width = _codecContext->width;
+                _height = _codecContext->height;
+
+                _frame = ffmpeg.av_frame_alloc();
+                _packet = ffmpeg.av_packet_alloc();
+
+                _swsContext = ffmpeg.sws_getContext(
+                    _width, _height, _codecContext->pix_fmt,
+                    _width, _height, AVPixelFormat.AV_PIX_FMT_BGRA,
+                    1, null, null, null // 1 = SWS_FAST_BILINEAR
+                );
+
+                _stats = new DecoderStats
+                {
+                    VideoInfo = $"{_width}x{_height} {ffmpeg.avcodec_get_name(_codecContext->codec_id)}",
+                    ThreadCount = _codecContext->thread_count == 0 ? Environment.ProcessorCount : _codecContext->thread_count
+                };
+
+                _bgraBuffer = new byte[_width * _height * 4];
+                _bgraBufferHandle = GCHandle.Alloc(_bgraBuffer, GCHandleType.Pinned);
+                _bgraBufferPointer = _bgraBufferHandle.AddrOfPinnedObject();
+
+                _isRunning = true;
+                _isPaused = true;
+                _isFinished = false;
+
+                _decodeThread = new Thread(DecodeLoop) { IsBackground = true, Name = "FFmpegDecoderThread" };
+                _decodeThread.Start();
             }
-
-            if (_videoStreamIndex == -1)
-                throw new Exception("Could not find video stream");
-
-            var codecParameters = _formatContext->streams[_videoStreamIndex]->codecpar;
-            var codec = ffmpeg.avcodec_find_decoder(codecParameters->codec_id);
-            _codecContext = ffmpeg.avcodec_alloc_context3(codec);
-            ffmpeg.avcodec_parameters_to_context(_codecContext, codecParameters);
-
-            if (ffmpeg.avcodec_open2(_codecContext, codec, null) < 0)
-                throw new Exception("Could not open codec");
-
-            _width = _codecContext->width;
-            _height = _codecContext->height;
-
-            _frame = ffmpeg.av_frame_alloc();
-            _packet = ffmpeg.av_packet_alloc();
-
-            _swsContext = ffmpeg.sws_getContext(
-                _width, _height, _codecContext->pix_fmt,
-                _width, _height, AVPixelFormat.AV_PIX_FMT_BGRA,
-                2, null, null, null
-            );
-
-            _bgraBuffer = new byte[_width * _height * 4];
-            _bgraBufferHandle = GCHandle.Alloc(_bgraBuffer, GCHandleType.Pinned);
-            _bgraBufferPointer = _bgraBufferHandle.AddrOfPinnedObject();
-
-            _isRunning = true;
-            _isPaused = true;
-            _isFinished = false;
-
-            _decodeThread = new Thread(DecodeLoop) { IsBackground = true, Name = "FFmpegDecoderThread" };
-            _decodeThread.Start();
+            catch
+            {
+                Cleanup();
+                throw;
+            }
         }
 
         public void Play()
@@ -164,7 +205,12 @@ namespace JonPlayer
         {
             lock (_lock)
             {
-                _playbackSpeed = speed;
+                if (_playbackSpeed != speed)
+                {
+                    _playbackSpeed = speed;
+                    _speedChanged = true;
+                    Monitor.Pulse(_lock);
+                }
             }
         }
 
@@ -177,7 +223,15 @@ namespace JonPlayer
             double fps = ffmpeg.av_q2d(_formatContext->streams[_videoStreamIndex]->r_frame_rate);
             if (fps <= 0) fps = 29.97;
 
+            _stats.TargetFps = fps;
+            _stats.LateFrames = 0;
+            _framesDecodedThisSecond = 0;
+            _totalDecodeTimeMs = 0;
+            _decodeTimeSamples = 0;
+            _lastFpsCalcTime = DateTime.UtcNow;
+
             var stopwatch = new Stopwatch();
+            var decodeTimer = new Stopwatch();
             double currentPlaybackPtsTime = 0;
             double targetSeekMs = -1;
 
@@ -232,8 +286,12 @@ namespace JonPlayer
                     int sendRes = ffmpeg.avcodec_send_packet(_codecContext, _packet);
                     if (sendRes >= 0)
                     {
-                        while (ffmpeg.avcodec_receive_frame(_codecContext, _frame) >= 0)
+                        while (true)
                         {
+                            decodeTimer.Restart();
+                            if (ffmpeg.avcodec_receive_frame(_codecContext, _frame) < 0) break;
+                            decodeTimer.Stop();
+
                             double ptsTime = _frame->best_effort_timestamp * ffmpeg.av_q2d(timeBase) * 1000.0; // ms
 
                             if (targetSeekMs >= 0)
@@ -247,31 +305,45 @@ namespace JonPlayer
                                 stopwatch.Restart();
                             }
 
+                            lock (_lock)
+                            {
+                                if (_speedChanged)
+                                {
+                                    if (stopwatch.IsRunning)
+                                    {
+                                        currentPlaybackPtsTime = ptsTime;
+                                        stopwatch.Restart();
+                                    }
+                                    _speedChanged = false;
+                                }
+                            }
+
                             // Sync / Delay logic based on stopwatch and speed
                             if (!stopwatch.IsRunning)
                             {
-                                stopwatch.Start();
+                                stopwatch.Restart();
                                 currentPlaybackPtsTime = ptsTime;
                             }
 
                             double elapsed = stopwatch.ElapsedMilliseconds * _playbackSpeed;
                             double targetPtsDelta = ptsTime - currentPlaybackPtsTime;
+                            double delay = targetPtsDelta - elapsed;
 
-                            if (targetPtsDelta > elapsed)
+                            _stats.SyncDelayMs = delay;
+                            if (delay < -30.0) _stats.LateFrames++;
+
+                            if (delay > 0 && delay < 2000)
                             {
-                                double delay = targetPtsDelta - elapsed;
-                                if (delay > 0 && delay < 2000)
+                                lock (_lock)
                                 {
-                                    lock (_lock)
+                                    if (_isRunning)
                                     {
-                                        if (_isRunning)
-                                        {
-                                            Monitor.Wait(_lock, (int)(delay / _playbackSpeed));
-                                        }
+                                        Monitor.Wait(_lock, (int)(delay / _playbackSpeed));
                                     }
                                 }
                             }
 
+                            decodeTimer.Start();
                             // Convert to BGRA via SwScale
                             byte*[] dstData = { (byte*)_bgraBufferPointer, null, null, null };
                             int[] dstLinesize = { _width * 4, 0, 0, 0 };
@@ -279,6 +351,24 @@ namespace JonPlayer
                                 _swsContext, _frame->data, _frame->linesize, 0, _height,
                                 dstData, dstLinesize
                             );
+                            decodeTimer.Stop();
+
+                            _totalDecodeTimeMs += decodeTimer.Elapsed.TotalMilliseconds;
+                            _decodeTimeSamples++;
+                            _framesDecodedThisSecond++;
+
+                            var now = DateTime.UtcNow;
+                            if ((now - _lastFpsCalcTime).TotalMilliseconds >= 1000)
+                            {
+                                _stats.ActualFps = _framesDecodedThisSecond;
+                                if (_decodeTimeSamples > 0)
+                                    _stats.AvgDecodeTimeMs = _totalDecodeTimeMs / _decodeTimeSamples;
+                                
+                                _framesDecodedThisSecond = 0;
+                                _totalDecodeTimeMs = 0;
+                                _decodeTimeSamples = 0;
+                                _lastFpsCalcTime = now;
+                            }
 
                             FrameDecoded?.Invoke(_bgraBufferPointer, _width, _height, _width * 4);
 
@@ -297,7 +387,10 @@ namespace JonPlayer
         private void Cleanup()
         {
             if (_bgraBufferHandle.IsAllocated)
+            {
                 _bgraBufferHandle.Free();
+                _bgraBufferHandle = default;
+            }
 
             if (_swsContext != null)
             {
@@ -336,7 +429,9 @@ namespace JonPlayer
 
         public void Dispose()
         {
+            if (_isDisposed) return;
             Stop();
+            _isDisposed = true;
         }
     }
 }

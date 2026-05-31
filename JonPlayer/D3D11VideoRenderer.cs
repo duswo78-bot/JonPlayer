@@ -27,6 +27,7 @@ namespace JonPlayer
         private IDirect3DTexture9? _d3d9Texture;
         private IDirect3DSurface9? _d3d9Surface;
         private IntPtr _sharedHandle;
+        private bool _isDisposed;
 
         public D3DImage D3DImage { get; } = new D3DImage();
 
@@ -76,6 +77,10 @@ namespace JonPlayer
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Failed to initialize Direct3D: {ex.Message}");
+                _d3d9Device?.Dispose(); _d3d9Device = null;
+                _d3d9Ex?.Dispose(); _d3d9Ex = null;
+                _d3d11Context?.Dispose(); _d3d11Context = null;
+                _d3d11Device?.Dispose(); _d3d11Device = null;
             }
         }
 
@@ -154,6 +159,7 @@ namespace JonPlayer
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Failed to create shared texture: {ex.Message}");
+                CleanupResources();
             }
         }
 
@@ -220,11 +226,13 @@ namespace JonPlayer
 
         public void Dispose()
         {
+            if (_isDisposed) return;
             CleanupResources();
             _d3d9Device?.Dispose(); _d3d9Device = null;
             _d3d9Ex?.Dispose(); _d3d9Ex = null;
             _d3d11Context?.Dispose(); _d3d11Context = null;
             _d3d11Device?.Dispose(); _d3d11Device = null;
+            _isDisposed = true;
         }
     }
 }
