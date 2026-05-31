@@ -28,6 +28,7 @@ namespace JonPlayer
         private IDirect3DSurface9? _d3d9Surface;
         private IntPtr _sharedHandle;
         private bool _isDisposed;
+        private volatile bool _isDirty;
 
         public D3DImage D3DImage { get; } = new D3DImage();
 
@@ -37,6 +38,28 @@ namespace JonPlayer
         public D3D11VideoRenderer()
         {
             InitializeD3D();
+            if (System.Windows.Application.Current?.Dispatcher != null)
+            {
+                System.Windows.Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    CompositionTarget.Rendering += OnRendering;
+                }));
+            }
+        }
+
+        private void OnRendering(object? sender, EventArgs e)
+        {
+            if (_isDirty && D3DImage.IsFrontBufferAvailable)
+            {
+                _isDirty = false;
+                try
+                {
+                    D3DImage.Lock();
+                    D3DImage.AddDirtyRect(new Int32Rect(0, 0, Width, Height));
+                    D3DImage.Unlock();
+                }
+                catch { }
+            }
         }
 
         private void InitializeD3D()
@@ -174,21 +197,8 @@ namespace JonPlayer
                 _d3d11Context.UpdateSubresource(_d3d11Texture, 0, null, bgraData, (uint)stride, 0);
                 _d3d11Context.Flush();
 
-                // 7. Update WPF D3DImage (BeginInvoke to avoid deadlock with Stop/Join)
-                int w = Width, h = Height;
-                D3DImage.Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    try
-                    {
-                        if (D3DImage.IsFrontBufferAvailable)
-                        {
-                            D3DImage.Lock();
-                            D3DImage.AddDirtyRect(new Int32Rect(0, 0, w, h));
-                            D3DImage.Unlock();
-                        }
-                    }
-                    catch { /* D3DImage may be disposed during shutdown */ }
-                }));
+                // 7. Update WPF D3DImage (Flag as dirty for CompositionTarget)
+                _isDirty = true;
             }
             catch (Exception ex)
             {
@@ -227,12 +237,20 @@ namespace JonPlayer
         public void Dispose()
         {
             if (_isDisposed) return;
+            _isDisposed = true;
+
+            if (System.Windows.Application.Current?.Dispatcher != null)
+            {
+                System.Windows.Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    CompositionTarget.Rendering -= OnRendering;
+                }));
+            }
             CleanupResources();
             _d3d9Device?.Dispose(); _d3d9Device = null;
             _d3d9Ex?.Dispose(); _d3d9Ex = null;
             _d3d11Context?.Dispose(); _d3d11Context = null;
             _d3d11Device?.Dispose(); _d3d11Device = null;
-            _isDisposed = true;
         }
     }
 }

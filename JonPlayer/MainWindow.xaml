@@ -19,7 +19,7 @@
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="40"
                       ResizeBorderThickness="6"
-                      GlassFrameThickness="-1"
+                      GlassFrameThickness="1"
                       CornerRadius="0"/>
     </WindowChrome.WindowChrome>
 
@@ -158,13 +158,13 @@
         </Style>
 
         <Style x:Key="TimelineSlider" TargetType="Slider">
-            <Setter Property="Height" Value="45"/>
+            <Setter Property="Height" Value="20"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Slider">
-                        <Grid>
-                            <Rectangle Fill="Transparent" Height="45"/>
+                        <Grid Background="Transparent">
+                            <Rectangle Fill="Transparent" Height="20"/>
                             <Border Height="4" CornerRadius="2" Background="{DynamicResource DividerBrush}" VerticalAlignment="Center"/>
                             <Border Height="4" CornerRadius="2" Background="{DynamicResource AccentBrush}" VerticalAlignment="Center" HorizontalAlignment="Left">
                                 <Border.Width>
@@ -211,13 +211,13 @@
         </Style>
 
         <Style x:Key="FsTimelineSlider" TargetType="Slider">
-            <Setter Property="Height" Value="45"/>
+            <Setter Property="Height" Value="20"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Slider">
-                        <Grid>
-                            <Rectangle Fill="Transparent" Height="45"/>
+                        <Grid Background="Transparent">
+                            <Rectangle Fill="Transparent" Height="20"/>
                             <Border Height="4" CornerRadius="2" Background="#44FFFFFF" VerticalAlignment="Center"/>
                             <Border Height="4" CornerRadius="2" Background="#1DB954" VerticalAlignment="Center" HorizontalAlignment="Left">
                                 <Border.Width>

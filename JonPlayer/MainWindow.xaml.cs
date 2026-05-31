@@ -13,6 +13,7 @@ using System.Text;
 using Microsoft.Win32;
 using System.Windows.Shell;
 using System.Windows.Controls.Primitives;
+using NAudio.Wave;
 using System.Diagnostics;
 
 // ── Resolve WPF vs WinForms ambiguities ──────────────────
@@ -60,7 +61,10 @@ namespace JonPlayer
     public partial class MainWindow : Window
     {
         private D3D11VideoRenderer? _renderer;
-        private FFmpegVideoDecoder? _decoder;
+        private FFmpegMediaDecoder? _decoder;
+        
+        private WaveOutEvent? _waveOut;
+        private BufferedWaveProvider? _waveProvider;
 
         private bool _isUserDraggingSlider;
         private bool _isUpdatingFromPlayer;
@@ -149,6 +153,14 @@ namespace JonPlayer
 
         private void Window_StateChanged(object? sender, EventArgs e)
         {
+            if (_isChangingFullscreen) return;
+
+            if (_isFullscreen && WindowState != WindowState.Maximized)
+            {
+                ExitFullscreen();
+                return;
+            }
+
             if (WindowState == WindowState.Maximized && !_isFullscreen)
                 MainGrid.Margin = new Thickness(8); // 최대화 시 화면 밖으로 컨트롤 바가 잘리는 현상 방지
             else
@@ -384,7 +396,7 @@ namespace JonPlayer
 
         private string? _currentFilePath;
 
-        private void PlayFile(string path)
+        private async void PlayFile(string path)
         {
             _currentFilePath = path;
             _openCount++;
@@ -395,20 +407,36 @@ namespace JonPlayer
                 VideoElement.Source = _renderer.D3DImage;
             }
 
-            if (_decoder == null)
+            var oldDecoder = _decoder;
+            _decoder = null;
+            
+            if (oldDecoder != null)
             {
-                _decoder = new FFmpegVideoDecoder();
-                _decoder.FrameDecoded += Decoder_FrameDecoded;
-                _decoder.PositionChanged += Decoder_PositionChanged;
-                _decoder.TimeUpdated += Decoder_TimeUpdated;
+                await Task.Run(() => 
+                {
+                    oldDecoder.Stop();
+                    // Optional: oldDecoder.Dispose() if IDisposable
+                });
             }
+
+            var newDecoder = new FFmpegMediaDecoder();
+            newDecoder.FrameDecoded += Decoder_FrameDecoded;
+            newDecoder.AudioDataAvailable += Decoder_AudioDataAvailable;
+            newDecoder.PositionChanged += Decoder_PositionChanged;
+            newDecoder.TimeUpdated += Decoder_TimeUpdated;
+            newDecoder.PlaybackFinished += Decoder_PlaybackFinished;
+            newDecoder.SeekPerformed += () => { _waveProvider?.ClearBuffer(); };
+            newDecoder.GetAudioBufferedDurationMs = () => _waveProvider?.BufferedDuration.TotalMilliseconds ?? 0;
 
             try
             {
-                _decoder.PlaybackFinished -= Decoder_PlaybackFinished;
-                _decoder.PlaybackFinished += Decoder_PlaybackFinished;
-                _decoder.Open(path);
+                await Task.Run(() => newDecoder.Open(path));
+                
+                _decoder = newDecoder;
+                InitAudioPlayer();
+                
                 _decoder.Play();
+                _waveOut?.Play();
 
                 var name = Path.GetFileName(path);
                 TxtNowPlaying.Text = name;
@@ -429,6 +457,8 @@ namespace JonPlayer
         private void BtnStop_Click        (object sender, RoutedEventArgs e)
         {
             _decoder?.Stop();
+            _waveOut?.Stop();
+            // _waveProvider?.ClearBuffer(); // Cleared in SeekPerformed, and provider is destroyed on next PlayFile
             UpdatePlayPauseUI(false);
             if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
             if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
@@ -454,12 +484,48 @@ namespace JonPlayer
             WpfMessageBox.Show("플레이리스트 다중 재생 기능은 향후 업데이트될 예정입니다.", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
+        private void InitAudioPlayer()
+        {
+            if (_waveOut != null)
+            {
+                _waveOut.Stop();
+                _waveOut.Dispose();
+                _waveOut = null;
+            }
+
+            if (_decoder != null && _decoder.AudioSampleRate > 0)
+            {
+                var format = new WaveFormat(_decoder.AudioSampleRate, 16, _decoder.AudioChannels);
+                _waveProvider = new BufferedWaveProvider(format)
+                {
+                    BufferDuration = TimeSpan.FromSeconds(2),
+                    DiscardOnBufferOverflow = true
+                };
+
+                _waveOut = new WaveOutEvent { DesiredLatency = 100 };
+                _waveOut.Init(_waveProvider);
+                if (SliderVolume != null)
+                {
+                    _waveOut.Volume = _isMuted ? 0 : (float)(SliderVolume.Value / 100.0);
+                }
+            }
+        }
+
+        private void Decoder_AudioDataAvailable(byte[] buffer, int length)
+        {
+            if (_waveProvider != null && _waveProvider.BufferedDuration.TotalSeconds < 1.8)
+            {
+                _waveProvider.AddSamples(buffer, 0, length);
+            }
+        }
+
         private void TogglePlayPause()
         {
             if (_decoder == null) return;
             if (_decoder.IsPlaying)
             {
                 _decoder.Pause();
+                _waveOut?.Pause();
                 UpdatePlayPauseUI(false);
             }
             else
@@ -472,6 +538,7 @@ namespace JonPlayer
                 }
                 
                 _decoder.Play();
+                _waveOut?.Play();
                 UpdatePlayPauseUI(true);
             }
         }
@@ -633,6 +700,7 @@ namespace JonPlayer
             _isUpdatingFromPlayer = false;
 
             if (!_isMuted) UpdateMuteIcon(vol);
+            if (_waveOut != null) _waveOut.Volume = _isMuted ? 0 : (float)(vol / 100.0);
         }
 
         private void UpdateMuteIcon(int vol)
@@ -678,23 +746,25 @@ namespace JonPlayer
             else EnterFullscreen();
         }
 
+        private bool _isChangingFullscreen = false;
+
         private void EnterFullscreen()
         {
             if (_isFullscreen) return;
 
+            _isChangingFullscreen = true;
             _isFullscreen = true;
 
             _prevWindowState = WindowState;
             _prevWindowStyle = WindowStyle;
             _prevResizeMode  = ResizeMode;
 
-            WindowChrome.SetWindowChrome(this, new WindowChrome
+            var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
+            if (chrome != null)
             {
-                CaptionHeight = 0,
-                ResizeBorderThickness = new Thickness(0),
-                GlassFrameThickness = new Thickness(-1),
-                CornerRadius = new CornerRadius(0)
-            });
+                chrome.CaptionHeight = 0;
+                chrome.ResizeBorderThickness = new Thickness(0);
+            }
 
             WindowStyle  = WindowStyle.None;
             ResizeMode   = ResizeMode.NoResize;
@@ -707,6 +777,7 @@ namespace JonPlayer
             RowControls.Height = new GridLength(0);
 
             MainGrid.Margin = new Thickness(0);
+            _isChangingFullscreen = false;
 
             if (SliderVolumeFS   != null) SliderVolumeFS.Value   = SliderVolume.Value;
             if (SliderTimelineFS != null) SliderTimelineFS.Value  = SliderTimeline.Value;
@@ -723,6 +794,7 @@ namespace JonPlayer
         private void ExitFullscreen()
         {
             if (!_isFullscreen) return;
+            _isChangingFullscreen = true;
             _isFullscreen = false;
 
             RowTitleBar.Height = new GridLength(40);
@@ -732,6 +804,7 @@ namespace JonPlayer
             WindowStyle = _prevWindowStyle;
             WindowState = _prevWindowState;
             ResizeMode  = _prevResizeMode;
+            _isChangingFullscreen = false;
 
             if (WindowState == WindowState.Maximized)
             {
@@ -744,17 +817,18 @@ namespace JonPlayer
                 BtnMaximize.ToolTip = "Maximize";
             }
 
-            try
+            var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
+            if (chrome != null)
             {
-                WindowChrome.SetWindowChrome(this, new WindowChrome
-                {
-                    CaptionHeight         = 40,
-                    ResizeBorderThickness = new Thickness(6),
-                    GlassFrameThickness   = new Thickness(-1),
-                    CornerRadius          = new CornerRadius(0)
-                });
+                chrome.CaptionHeight = 40;
+                chrome.ResizeBorderThickness = new Thickness(6);
             }
-            catch { }
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                MainGrid.UpdateLayout();
+                this.InvalidateVisual();
+            }), System.Windows.Threading.DispatcherPriority.Render);
 
             PopupFsExit.IsOpen = false;
             FsBottomStrip.Visibility = Visibility.Collapsed;
@@ -860,6 +934,8 @@ namespace JonPlayer
             
             sb.AppendLine("Sync");
             sb.AppendLine("────────────────────");
+            sb.AppendLine($"{"Video PTS".PadRight(12)}{stats.VideoPts:F0} ms");
+            sb.AppendLine($"{"Audio PTS".PadRight(12)}{stats.AudioPts:F0} ms");
             sb.AppendLine($"{"Drift".PadRight(12)}{stats.SyncDelayMs:F0} ms");
             sb.AppendLine($"{"LateFrames".PadRight(12)}{stats.LateFrames}");
             sb.AppendLine();
