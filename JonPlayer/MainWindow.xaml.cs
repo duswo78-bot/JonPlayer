@@ -13,6 +13,7 @@ using System.Text;
 using Microsoft.Win32;
 using System.Windows.Shell;
 using System.Windows.Controls.Primitives;
+using System.Windows.Media.Imaging;
 using NAudio.Wave;
 using System.Diagnostics;
 
@@ -30,6 +31,26 @@ using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 
 namespace JonPlayer
 {
+    // Converter: bool → Accent(green) or Transparent — used for now-playing bar indicator
+    public class BoolToAccentBrushConverter : IValueConverter
+    {
+        public static readonly BoolToAccentBrushConverter Instance = new();
+        private static readonly SolidColorBrush AccentBrush = new SolidColorBrush(Color.FromRgb(0x1D, 0xB9, 0x54));
+        private static readonly SolidColorBrush TransBrush  = new SolidColorBrush(Colors.Transparent);
+        public object Convert(object value, Type t, object p, CultureInfo c) => value is true ? AccentBrush : TransBrush;
+        public object ConvertBack(object value, Type t, object p, CultureInfo c) => throw new NotImplementedException();
+    }
+
+    // Converter: bool → bright white or dimmed white — used for now-playing text
+    public class BoolToTextBrushConverter : IValueConverter
+    {
+        public static readonly BoolToTextBrushConverter Instance = new();
+        private static readonly SolidColorBrush WhiteBrush = new SolidColorBrush(Colors.White);
+        private static readonly SolidColorBrush MutedBrush = new SolidColorBrush(Color.FromArgb(0xBB, 0xFF, 0xFF, 0xFF));
+        public object Convert(object value, Type t, object p, CultureInfo c) => value is true ? WhiteBrush : MutedBrush;
+        public object ConvertBack(object value, Type t, object p, CultureInfo c) => throw new NotImplementedException();
+    }
+
     public class SliderFillConverter : IMultiValueConverter
     {
         public static readonly SliderFillConverter Instance = new();
@@ -68,6 +89,7 @@ namespace JonPlayer
 
         private bool _isUserDraggingSlider;
         private bool _isUpdatingFromPlayer;
+        private bool _isSeeking;
 
         private int   _lastVolume    = 80;
         private bool  _isMuted;
@@ -76,6 +98,7 @@ namespace JonPlayer
 
         private bool        _isFullscreen;
         private WindowState _prevWindowState;
+        private bool        _prevTopmost;
         private WindowStyle _prevWindowStyle;
         private ResizeMode  _prevResizeMode;
 
@@ -96,29 +119,89 @@ namespace JonPlayer
         private bool _isMouseOverFsStrip;
         private bool _isMouseOverFsExitBadge;
 
+
+        [DllImport("winmm.dll")]
+        public static extern uint timeBeginPeriod(uint uPeriod);
+
+        [DllImport("winmm.dll")]
+        public static extern uint timeEndPeriod(uint uPeriod);
+
+        private DispatcherTimer? _playlistTimer;
+        private bool _isPlaylistHovered;
+
+        private DispatcherTimer _cursorHideTimer;
+        private DispatcherTimer _fsVolumeTimer;
+
+        private readonly string[] _idleVibes = new string[]
+        {
+            "Pick Your Vibe",
+            "Bring on the Good Stuff",
+            "Queue Up Some Magic",
+            "Ready for Your Next Favorite",
+            "The Show Starts With You"
+        };
+        private void SetRandomVibe()
+        {
+            if (TxtNowPlaying != null)
+            {
+                string newVibe;
+                do
+                {
+                    newVibe = _idleVibes[Random.Shared.Next(_idleVibes.Length)];
+                } while (newVibe == TxtNowPlaying.Text && _idleVibes.Length > 1);
+
+                TxtNowPlaying.Text = newVibe;
+            }
+        }
+
         public MainWindow()
         {
             InitializeComponent();
+            SetRandomVibe();
 
             this.StateChanged += Window_StateChanged;
+            this.MouseMove += Window_MouseMove;
 
             _fsMousePollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
             _fsMousePollTimer.Tick += FsMousePollTimer_Tick;
 
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += StatsTimer_Tick;
+            
+            _cursorHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _cursorHideTimer.Tick += (s, e) =>
+            {
+                if (_isFullscreen) this.Cursor = System.Windows.Input.Cursors.None;
+                _cursorHideTimer.Stop();
+            };
+
+            _fsVolumeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            _fsVolumeTimer.Tick += (s, e) =>
+            {
+                OverlayFsVolume.Visibility = Visibility.Collapsed;
+                _fsVolumeTimer.Stop();
+            };
 
             _lastCpuTime = Process.GetCurrentProcess().TotalProcessorTime;
             _lastCpuCheckTime = DateTime.UtcNow;
 
             ApplyTheme(false);
+
+            timeBeginPeriod(1);
+
+            Closed += (s, e) => {
+                _decoder?.Stop();
+                _waveOut?.Stop();
+                _waveOut?.Dispose();
+                timeEndPeriod(1);
+            };
         }
 
-        private void Decoder_FrameDecoded(IntPtr bgraPointer, int width, int height, int stride)
+        private void Decoder_FrameDecoded(IntPtr bgraData, int width, int height, int stride, bool isHardwareTexture)
         {
             _renderTimer.Restart();
             _renderer?.ResetSize(width, height);
-            _renderer?.RenderFrame(bgraPointer, stride);
+            _renderer?.RenderFrame(bgraData, width, height, stride, isHardwareTexture);
             _renderTimer.Stop();
 
             _totalRenderTimeMs += _renderTimer.Elapsed.TotalMilliseconds;
@@ -127,11 +210,11 @@ namespace JonPlayer
 
         private void Decoder_PositionChanged(double ratio)
         {
-            if (_isUserDraggingSlider) return;
+            if (_isUserDraggingSlider || _isSeeking) return;
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (_isUserDraggingSlider || _decoder == null || !_decoder.IsRunning) return;
+                if (_isUserDraggingSlider || _isSeeking || _decoder == null || !_decoder.IsRunning) return;
                 _isUpdatingFromPlayer = true;
                 SliderTimeline.Value = ratio * SliderTimeline.Maximum;
                 if (SliderTimelineFS != null) SliderTimelineFS.Value = SliderTimeline.Value;
@@ -143,11 +226,29 @@ namespace JonPlayer
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (_decoder == null || !_decoder.IsRunning) return;
+                if (_isSeeking || _decoder == null || !_decoder.IsRunning) return;
                 TxtCurrentTime.Text = current.ToString(@"hh\:mm\:ss");
                 TxtTotalTime.Text = total.ToString(@"hh\:mm\:ss");
                 if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = TxtCurrentTime.Text;
                 if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = TxtTotalTime.Text;
+
+                // Handle Next Video Overlay
+                if (_playlist.Count > 1 && _playlistIndex >= 0 && _playlistIndex < _playlist.Count - 1)
+                {
+                    if (total.TotalSeconds > 0 && total - current <= TimeSpan.FromSeconds(5))
+                    {
+                        TxtNextVideoName.Text = _playlist[_playlistIndex + 1].Name;
+                        NextVideoOverlay.Visibility = Visibility.Visible;
+                    }
+                    else
+                    {
+                        NextVideoOverlay.Visibility = Visibility.Collapsed;
+                    }
+                }
+                else
+                {
+                    NextVideoOverlay.Visibility = Visibility.Collapsed;
+                }
             }));
         }
 
@@ -300,15 +401,19 @@ namespace JonPlayer
             {
                 SetBrush("BgBrush", 0xF3, 0xF3, 0xF7);
                 SetBrush("PanelBrush", 0xFF, 0xFF, 0xFF);
-                SetBrush("TextBrush", 0x1C, 0x1C, 0x1E);
-                SetBrush("TextMutedBrush", 0x8E, 0x8E, 0x93);
+                SetBrush("TextBrush", 0x00, 0x00, 0x00);
+                SetBrush("TextMutedBrush", 0x44, 0x44, 0x44);
                 SetBrush("AccentBrush", 0x00, 0x7A, 0xFF);
                 SetBrush("HoverBrush", 0xE5, 0xE5, 0xEA);
                 SetBrush("ActiveBrush", 0xD1, 0xD1, 0xD6);
                 SetBrush("DividerBrush", 0xD8, 0xD8, 0xDC);
 
+                SetBrushAlpha("PlaylistBgBrush", 0x99, 0xFF, 0xFF, 0xFF);
+                SetBrushAlpha("PlaylistBorderBrush", 0x66, 0xAA, 0xAA, 0xAA);
+                SetBrushAlpha("PlaylistTopGlossBrush", 0x44, 0xFF, 0xFF, 0xFF);
+
                 var knob = MakeKnob(0xF2, 0xF2, 0xF7, 0xE5, 0xE5, 0xEA, 0xC7, 0xC7, 0xCC, 0xAE, 0xAE, 0xB2);
-                System.Windows.Application.Current.Resources["KnobBgBrush"] = knob;
+                this.Resources["KnobBgBrush"] = knob;
 
                 BtnTheme.ToolTip = "Dark Mode로 전환";
                 if (BtnThemeFS != null) BtnThemeFS.ToolTip = "Dark Mode로 전환";
@@ -328,8 +433,12 @@ namespace JonPlayer
                 SetBrush("ActiveBrush", 0x38, 0x38, 0x38);
                 SetBrush("DividerBrush", 0x2C, 0x2C, 0x2C);
 
+                SetBrushAlpha("PlaylistBgBrush", 0x99, 0x0A, 0x0A, 0x0A);
+                SetBrushAlpha("PlaylistBorderBrush", 0x40, 0xFF, 0xFF, 0xFF);
+                SetBrushAlpha("PlaylistTopGlossBrush", 0x18, 0xFF, 0xFF, 0xFF);
+
                 var knob = MakeKnob(0x4E, 0x4E, 0x52, 0x24, 0x24, 0x26, 0x5E, 0x5E, 0x62, 0x2C, 0x2C, 0x2F);
-                System.Windows.Application.Current.Resources["KnobBgBrush"] = knob;
+                this.Resources["KnobBgBrush"] = knob;
 
                 BtnTheme.ToolTip = "Light Mode로 전환";
                 if (BtnThemeFS != null) BtnThemeFS.ToolTip = "Light Mode로 전환";
@@ -344,7 +453,14 @@ namespace JonPlayer
         {
             var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
             brush.Freeze();
-            System.Windows.Application.Current.Resources[key] = brush;
+            this.Resources[key] = brush;
+        }
+
+        private void SetBrushAlpha(string key, byte a, byte r, byte g, byte b)
+        {
+            var brush = new SolidColorBrush(Color.FromArgb(a, r, g, b));
+            brush.Freeze();
+            this.Resources[key] = brush;
         }
 
         private static LinearGradientBrush MakeKnob(byte r0, byte g0, byte b0, byte r1, byte g1, byte b1, byte r2, byte g2, byte b2, byte r3, byte g3, byte b3)
@@ -359,12 +475,44 @@ namespace JonPlayer
 
         private void BtnOpen_Click(object sender, RoutedEventArgs e) => OpenFile();
 
+        public class PlaylistItem : System.ComponentModel.INotifyPropertyChanged
+        {
+            public string Name { get; set; } = string.Empty;
+            public string Path { get; set; } = string.Empty;
+
+            private bool _isCurrentlyPlaying;
+            public bool IsCurrentlyPlaying
+            {
+                get => _isCurrentlyPlaying;
+                set
+                {
+                    if (_isCurrentlyPlaying != value)
+                    {
+                        _isCurrentlyPlaying = value;
+                        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(IsCurrentlyPlaying)));
+                    }
+                }
+            }
+
+            public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+        }
+
+        // Drag state for playlist overlay
+        private bool   _isPlaylistDragging;
+        private Point  _playlistDragStart;
+        private double _playlistDragOriginX;
+        private double _playlistDragOriginY;
+
+        private System.Collections.ObjectModel.ObservableCollection<PlaylistItem> _playlist = new System.Collections.ObjectModel.ObservableCollection<PlaylistItem>();
+        private int _playlistIndex = -1;
+
         private void OpenFile()
         {
             var dlg = new OpenFileDialog
             {
                 Title  = "Open Media File",
-                Filter = "Video Files (*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts)|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts|Audio Files (*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a)|*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|All Files (*.*)|*.*",
+                Filter = "Supported Media Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts;*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|Video Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts|Audio Files|*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|All Files (*.*)|*.*",
+                Multiselect = true
             };
             
             if (!string.IsNullOrEmpty(_lastOpenDirectory))
@@ -375,9 +523,302 @@ namespace JonPlayer
             if (dlg.ShowDialog() == true)
             {
                 _lastOpenDirectory = Path.GetDirectoryName(dlg.FileName);
-                PlayFile(dlg.FileName);
+                LoadPlaylist(dlg.FileNames);
             }
         }
+
+        private void OpenFolder()
+        {
+            using (var dialog = new System.Windows.Forms.FolderBrowserDialog())
+            {
+                dialog.Description = "Select a folder containing media files";
+                dialog.UseDescriptionForTitle = true;
+                
+                if (!string.IsNullOrEmpty(_lastOpenDirectory))
+                    dialog.SelectedPath = _lastOpenDirectory;
+
+                if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                {
+                    _lastOpenDirectory = dialog.SelectedPath;
+                    var extensions = new[] { ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".ts", ".m2ts", ".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a" };
+                    var files = Directory.GetFiles(dialog.SelectedPath, "*.*", SearchOption.AllDirectories)
+                        .Where(f => extensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+                        .ToArray();
+
+                    if (files.Length > 0)
+                        LoadPlaylist(files);
+                }
+            }
+        }
+
+        private void UpdateNowPlayingHighlight()
+        {
+            for (int i = 0; i < _playlist.Count; i++)
+                _playlist[i].IsCurrentlyPlaying = (i == _playlistIndex);
+
+            // Update count badge
+            if (TxtPlaylistCount != null)
+                TxtPlaylistCount.Text = _playlist.Count.ToString();
+
+            // Scroll to current item
+            if (_playlistIndex >= 0 && _playlistIndex < _playlist.Count)
+                ListPlaylist.ScrollIntoView(_playlist[_playlistIndex]);
+        }
+
+        private void LoadPlaylist(string[] files)
+        {
+            _playlist.Clear();
+            foreach (var f in files) 
+            {
+                _playlist.Add(new PlaylistItem { Name = System.IO.Path.GetFileName(f), Path = f });
+            }
+
+            ListPlaylist.ItemsSource = _playlist;
+
+            if (_playlist.Count > 0)
+            {
+                _playlistIndex = 0;
+                PlayFile(_playlist[_playlistIndex].Path);
+                UpdateNowPlayingHighlight();
+                
+                if (_playlist.Count > 1)
+                {
+                    BtnPlaylistToggle.IsEnabled = true;
+                    BtnPlaylistToggleFS.IsEnabled = true;
+                    ShowPlaylistBriefly();
+                }
+            }
+
+            if (TxtPlaylistCount != null)
+                TxtPlaylistCount.Text = _playlist.Count.ToString();
+        }
+
+        private void ListPlaylist_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (ListPlaylist.SelectedItem is PlaylistItem item)
+            {
+                _playlistIndex = _playlist.IndexOf(item);
+                PlayFile(item.Path);
+                UpdateNowPlayingHighlight();
+            }
+        }
+
+        private void ListPlaylist_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key == Key.Delete && ListPlaylist.SelectedItem is PlaylistItem item)
+            {
+                int idx = _playlist.IndexOf(item);
+                if (idx != -1)
+                {
+                    _playlist.RemoveAt(idx);
+                    if (idx == _playlistIndex)
+                    {
+                        if (_playlist.Count > 0)
+                        {
+                            _playlistIndex = idx % _playlist.Count;
+                            PlayFile(_playlist[_playlistIndex].Path);
+                        }
+                        else
+                        {
+                            _playlistIndex = -1;
+                            CloseFile();
+                        }
+                    }
+                    else if (idx < _playlistIndex)
+                    {
+                        _playlistIndex--;
+                    }
+                }
+                if (_playlist.Count <= 1)
+                {
+                    BtnPlaylistToggle.IsEnabled = false;
+                    BtnPlaylistToggleFS.IsEnabled = false;
+                    PlaylistOverlay.Visibility = Visibility.Collapsed;
+                }
+                e.Handled = true;
+            }
+        }
+
+        private void BtnPlaylistToggle_Click(object sender, RoutedEventArgs e)
+        {
+            TogglePlaylist();
+        }
+
+        private void TogglePlaylist()
+        {
+            if (PlaylistOverlay.Visibility == Visibility.Visible)
+            {
+                PlaylistOverlay.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                PlaylistOverlay.Visibility = Visibility.Visible;
+                StartPlaylistHideTimer();
+            }
+        }
+
+        private void PlaylistOverlay_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            _isPlaylistHovered = true;
+            _playlistTimer?.Stop();
+        }
+
+        private void PlaylistOverlay_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            _isPlaylistHovered = false;
+            StartPlaylistHideTimer();
+        }
+
+        private void ShowPlaylistBriefly()
+        {
+            PlaylistOverlay.Visibility = Visibility.Visible;
+            StartPlaylistHideTimer();
+        }
+
+        private void StartPlaylistHideTimer()
+        {
+            _playlistTimer?.Stop();
+            _playlistTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            _playlistTimer.Tick += (s, e) =>
+            {
+                if (!_isPlaylistHovered && !PlaylistOverlay.IsKeyboardFocusWithin)
+                {
+                    PlaylistOverlay.Visibility = Visibility.Collapsed;
+                }
+                _playlistTimer.Stop();
+            };
+            _playlistTimer.Start();
+        }
+
+        private void BtnPlaylistAdd_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new OpenFileDialog
+            {
+                Multiselect = true,
+                Filter = "Supported Media Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts;*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|Video Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts|Audio Files|*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|All Files (*.*)|*.*"
+            };
+            if (dlg.ShowDialog() == true)
+            {
+                foreach (var f in dlg.FileNames)
+                {
+                    _playlist.Add(new PlaylistItem { Name = Path.GetFileName(f), Path = f });
+                }
+                BtnPlaylistToggle.IsEnabled = _playlist.Count > 1;
+                BtnPlaylistToggleFS.IsEnabled = _playlist.Count > 1;
+                UpdateNowPlayingHighlight();
+            }
+        }
+
+        private void BtnPlaylistClose_Click(object sender, RoutedEventArgs e)
+        {
+            PlaylistOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        // ── Playlist drag-to-move ──────────────────────────────────────────
+        private void PlaylistOverlay_DragStart(object sender, MouseButtonEventArgs e)
+        {
+            _isPlaylistDragging = true;
+            _playlistDragStart  = e.GetPosition(VideoGrid);
+            var tx = PlaylistTranslate;
+            _playlistDragOriginX = tx.X;
+            _playlistDragOriginY = tx.Y;
+            (sender as UIElement)?.CaptureMouse();
+            e.Handled = true;
+        }
+
+        private void PlaylistOverlay_DragMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (!_isPlaylistDragging) return;
+            var current = e.GetPosition(VideoGrid);
+            var tx = PlaylistTranslate;
+
+            double newX = _playlistDragOriginX + (current.X - _playlistDragStart.X);
+            double newY = _playlistDragOriginY + (current.Y - _playlistDragStart.Y);
+
+            double minX = -(VideoGrid.ActualWidth - PlaylistOverlay.Margin.Right - PlaylistOverlay.ActualWidth);
+            double maxX = PlaylistOverlay.Margin.Right;
+            if (minX > maxX) minX = maxX;
+
+            double minY = -(VideoGrid.ActualHeight - PlaylistOverlay.Margin.Bottom - PlaylistOverlay.ActualHeight);
+            double maxY = PlaylistOverlay.Margin.Bottom;
+            if (minY > maxY) minY = maxY;
+
+            tx.X = Math.Max(minX, Math.Min(newX, maxX));
+            tx.Y = Math.Max(minY, Math.Min(newY, maxY));
+
+            e.Handled = true;
+        }
+
+        private void PlaylistOverlay_DragEnd(object sender, MouseButtonEventArgs e)
+        {
+            _isPlaylistDragging = false;
+            (sender as UIElement)?.ReleaseMouseCapture();
+            e.Handled = true;
+        }
+
+
+
+        private void NextVideoOverlay_Click(object sender, RoutedEventArgs e)
+        {
+            NextVideoOverlay.Visibility = Visibility.Collapsed;
+            if (_playlist.Count > 1 && _playlistIndex >= 0 && _playlistIndex < _playlist.Count - 1)
+            {
+                _playlistIndex++;
+                PlayFile(_playlist[_playlistIndex].Path);
+                UpdateNowPlayingHighlight();
+            }
+        }
+
+        private void BtnMoveUp_Click(object sender, RoutedEventArgs e)
+        {
+            var btn = sender as WpfButton;
+            var item = btn?.DataContext as PlaylistItem;
+            if (item != null)
+            {
+                int index = _playlist.IndexOf(item);
+                if (index > 0)
+                {
+                    var currentlyPlaying = _playlistIndex >= 0 && _playlistIndex < _playlist.Count ? _playlist[_playlistIndex] : null;
+                    _playlist.Move(index, index - 1);
+                    if (currentlyPlaying != null) _playlistIndex = _playlist.IndexOf(currentlyPlaying);
+                }
+            }
+        }
+
+        private void BtnMoveDown_Click(object sender, RoutedEventArgs e)
+        {
+            var btn = sender as WpfButton;
+            var item = btn?.DataContext as PlaylistItem;
+            if (item != null)
+            {
+                int index = _playlist.IndexOf(item);
+                if (index >= 0 && index < _playlist.Count - 1)
+                {
+                    var currentlyPlaying = _playlistIndex >= 0 && _playlistIndex < _playlist.Count ? _playlist[_playlistIndex] : null;
+                    _playlist.Move(index, index + 1);
+                    if (currentlyPlaying != null) _playlistIndex = _playlist.IndexOf(currentlyPlaying);
+                }
+            }
+        }
+
+        private void UpdatePlaylistIndexAfterReorder()
+        {
+        }
+
+        private static T FindAncestor<T>(DependencyObject current) where T : DependencyObject
+        {
+            do
+            {
+                if (current is T ancestor)
+                {
+                    return ancestor;
+                }
+                current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+            }
+            while (current != null);
+            return null;
+        }
+
 
         private void Window_DragOver(object sender, System.Windows.DragEventArgs e)
         {
@@ -386,50 +827,119 @@ namespace JonPlayer
             e.Handled = true;
         }
 
+        private void Window_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (this.Cursor != System.Windows.Input.Cursors.Arrow) this.Cursor = System.Windows.Input.Cursors.Arrow;
+            _cursorHideTimer.Stop();
+            _cursorHideTimer.Start();
+        }
+
         private void Window_Drop(object sender, System.Windows.DragEventArgs e)
         {
             if (!e.Data.GetDataPresent(System.Windows.DataFormats.FileDrop)) return;
             var files = e.Data.GetData(System.Windows.DataFormats.FileDrop) as string[];
             if (files == null || files.Length == 0) return;
-            PlayFile(files[0]);
+            LoadPlaylist(files);
         }
 
         private string? _currentFilePath;
 
+        private bool _isOpeningFile = false;
+
+        private void PlayNext()
+        {
+            if (_playlist.Count > 0 && _playlistIndex < _playlist.Count - 1)
+            {
+                _playlistIndex++;
+                PlayFile(_playlist[_playlistIndex].Path);
+                UpdateNowPlayingHighlight();
+            }
+        }
+
+        private void Decoder_PlaybackFinished()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                UpdatePlayPauseUI(false);
+                if (_playlist.Count > 0 && _playlistIndex < _playlist.Count - 1)
+                {
+                    PlayNext();
+                }
+                else
+                {
+                    if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
+                    if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
+                    if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
+                    
+                    _isUpdatingFromPlayer = true;
+                    if (SliderTimeline != null) SliderTimeline.Value = 0;
+                    if (SliderTimelineFS != null) SliderTimelineFS.Value = 0;
+                    _isUpdatingFromPlayer = false;
+                    
+                    if (TxtCurrentTime != null) TxtCurrentTime.Text = "00:00:00";
+                    if (TxtTotalTime != null) TxtTotalTime.Text = "00:00:00";
+                    if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = "00:00:00";
+                    if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = "00:00:00";
+                    
+                    SetRandomVibe();
+                }
+            });
+        }
+
         private async void PlayFile(string path)
         {
-            _currentFilePath = path;
-            _openCount++;
-
-            if (_renderer == null)
-            {
-                _renderer = new D3D11VideoRenderer();
-                VideoElement.Source = _renderer.D3DImage;
-            }
-
-            var oldDecoder = _decoder;
-            _decoder = null;
-            
-            if (oldDecoder != null)
-            {
-                await Task.Run(() => 
-                {
-                    oldDecoder.Stop();
-                    // Optional: oldDecoder.Dispose() if IDisposable
-                });
-            }
-
-            var newDecoder = new FFmpegMediaDecoder();
-            newDecoder.FrameDecoded += Decoder_FrameDecoded;
-            newDecoder.AudioDataAvailable += Decoder_AudioDataAvailable;
-            newDecoder.PositionChanged += Decoder_PositionChanged;
-            newDecoder.TimeUpdated += Decoder_TimeUpdated;
-            newDecoder.PlaybackFinished += Decoder_PlaybackFinished;
-            newDecoder.SeekPerformed += () => { _waveProvider?.ClearBuffer(); };
-            newDecoder.GetAudioBufferedDurationMs = () => _waveProvider?.BufferedDuration.TotalMilliseconds ?? 0;
+            if (_isOpeningFile) return;
+            _isOpeningFile = true;
 
             try
             {
+                _currentFilePath = path;
+                _openCount++;
+
+                TxtNowPlaying.Text = "Loading...";
+
+                if (_renderer != null)
+                {
+                    _renderer.Dispose();
+                    _renderer = null;
+                }
+                if (VideoElement != null) VideoElement.Source = null;
+
+                var oldDecoder = _decoder;
+                _decoder = null;
+                
+                if (oldDecoder != null)
+                {
+                    await Task.Run(() => 
+                    {
+                        oldDecoder.Stop();
+                        oldDecoder.Dispose();
+                    });
+                }
+
+                _renderer = new D3D11VideoRenderer();
+                VideoElement.Source = _renderer.D3DImage;
+
+                var newDecoder = new FFmpegMediaDecoder();
+                newDecoder.SetSpeed(_currentSpeed);
+                if (_renderer != null)
+                {
+                    newDecoder.SetD3D11Device(_renderer.D3D11DevicePtr, _renderer.D3D11ContextPtr);
+                }
+                newDecoder.FrameDecoded += Decoder_FrameDecoded;
+                newDecoder.AudioDataAvailable += Decoder_AudioDataAvailable;
+                newDecoder.PositionChanged += Decoder_PositionChanged;
+                newDecoder.TimeUpdated += Decoder_TimeUpdated;
+                newDecoder.PlaybackFinished += Decoder_PlaybackFinished;
+                newDecoder.RotationDetected += Decoder_RotationDetected;
+                newDecoder.SeekInitiated += () => { _waveProvider?.ClearBuffer(); };
+                newDecoder.SeekPerformed += Decoder_SeekPerformed;
+                newDecoder.GetAudioBufferedDurationMs = () => _waveProvider?.BufferedDuration.TotalMilliseconds ?? 0;
+
+                Dispatcher.Invoke(() => {
+                    if (VideoRotation != null) VideoRotation.Angle = 0;
+                });
+
                 await Task.Run(() => newDecoder.Open(path));
                 
                 _decoder = newDecoder;
@@ -440,16 +950,76 @@ namespace JonPlayer
 
                 var name = Path.GetFileName(path);
                 TxtNowPlaying.Text = name;
-                Title = $"JonPlayer — {name}";
+                if (_playlist.Count > 1)
+                {
+                    Title = $"JonPlayer — ({_playlistIndex + 1}/{_playlist.Count}) {name}";
+                }
+                else
+                {
+                    Title = $"JonPlayer — {name}";
+                }
 
-                if (VideoElement != null) VideoElement.Visibility = Visibility.Visible;
-                if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
+                if (_decoder.HasVideo)
+                {
+                    if (VideoElement != null) VideoElement.Visibility = Visibility.Visible;
+                    if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
+                    if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
+                }
+                else
+                {
+                    if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
+                    if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
+                    if (AudioUI != null) AudioUI.Visibility = Visibility.Visible;
+
+                    try
+                    {
+                        var tfile = TagLib.File.Create(path);
+                        TxtAudioTitle.Text = string.IsNullOrWhiteSpace(tfile.Tag.Title) ? name : tfile.Tag.Title;
+                        
+                        string artist = string.Join(", ", tfile.Tag.Performers);
+                        TxtAudioArtist.Text = string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist;
+                        
+                        TxtAudioAlbum.Text = string.IsNullOrWhiteSpace(tfile.Tag.Album) ? "Unknown Album" : tfile.Tag.Album;
+
+                        if (tfile.Tag.Pictures.Length > 0)
+                        {
+                            var pic = tfile.Tag.Pictures[0];
+                            var ms = new System.IO.MemoryStream(pic.Data.Data);
+                            var bi = new System.Windows.Media.Imaging.BitmapImage();
+                            bi.BeginInit();
+                            bi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                            bi.StreamSource = ms;
+                            bi.EndInit();
+                            bi.Freeze();
+
+                            AudioCoverBackground.Source = bi;
+                            AudioCoverForeground.Source = bi;
+                        }
+                        else
+                        {
+                            AudioCoverBackground.Source = null;
+                            AudioCoverForeground.Source = null;
+                        }
+                    }
+                    catch
+                    {
+                        TxtAudioTitle.Text = name;
+                        TxtAudioArtist.Text = "Unknown Artist";
+                        TxtAudioAlbum.Text = "Unknown Album";
+                        AudioCoverBackground.Source = null;
+                        AudioCoverForeground.Source = null;
+                    }
+                }
 
                 UpdatePlayPauseUI(true);
             }
             catch (Exception ex)
             {
                 WpfMessageBox.Show($"파일을 열 수 없습니다.\n{ex.Message}", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            finally
+            {
+                _isOpeningFile = false;
             }
         }
 
@@ -461,6 +1031,7 @@ namespace JonPlayer
             // _waveProvider?.ClearBuffer(); // Cleared in SeekPerformed, and provider is destroyed on next PlayFile
             UpdatePlayPauseUI(false);
             if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
+            if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
             if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
             _isUpdatingFromPlayer = true;
             SliderTimeline.Value = 0;
@@ -468,20 +1039,32 @@ namespace JonPlayer
             _isUpdatingFromPlayer = false;
             TxtCurrentTime.Text = "00:00:00";
             if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = "00:00:00";
-            TxtNowPlaying.Text = "No file loaded";
+            SetRandomVibe();
             Title = "JonPlayer";
         }
         private void BtnSkipBack_Click    (object sender, RoutedEventArgs e) => SeekRelative(-10);
-        private void BtnSkipForward_Click (object sender, RoutedEventArgs e) => SeekRelative( 10);
+        private void BtnSkipForward_Click (object sender, RoutedEventArgs e) => SeekForward( 10);
         
+        private void SeekForward(double offsetSeconds) => SeekRelative(offsetSeconds);
+
+        private void PlayPrev()
+        {
+            if (_playlist.Count > 0 && _playlistIndex > 0)
+            {
+                _playlistIndex--;
+                PlayFile(_playlist[_playlistIndex].Path);
+                UpdateNowPlayingHighlight();
+            }
+        }
+
         private void BtnPrev_Click(object sender, RoutedEventArgs e)
         {
-            WpfMessageBox.Show("플레이리스트 다중 재생 기능은 향후 업데이트될 예정입니다.", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Information);
+            PlayPrev();
         }
 
         private void BtnNext_Click(object sender, RoutedEventArgs e)
         {
-            WpfMessageBox.Show("플레이리스트 다중 재생 기능은 향후 업데이트될 예정입니다.", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Information);
+            PlayNext();
         }
 
         private void InitAudioPlayer()
@@ -498,7 +1081,7 @@ namespace JonPlayer
                 var format = new WaveFormat(_decoder.AudioSampleRate, 16, _decoder.AudioChannels);
                 _waveProvider = new BufferedWaveProvider(format)
                 {
-                    BufferDuration = TimeSpan.FromSeconds(2),
+                    BufferDuration = TimeSpan.FromSeconds(5),
                     DiscardOnBufferOverflow = true
                 };
 
@@ -506,14 +1089,14 @@ namespace JonPlayer
                 _waveOut.Init(_waveProvider);
                 if (SliderVolume != null)
                 {
-                    _waveOut.Volume = _isMuted ? 0 : (float)(SliderVolume.Value / 100.0);
+                _waveOut.Volume = _isMuted ? 0 : (float)(SliderVolume.Value / 100.0);
                 }
             }
         }
 
         private void Decoder_AudioDataAvailable(byte[] buffer, int length)
         {
-            if (_waveProvider != null && _waveProvider.BufferedDuration.TotalSeconds < 1.8)
+            if (_waveProvider != null && _waveProvider.BufferedDuration.TotalSeconds < 4.5)
             {
                 _waveProvider.AddSamples(buffer, 0, length);
             }
@@ -521,7 +1104,13 @@ namespace JonPlayer
 
         private void TogglePlayPause()
         {
-            if (_decoder == null) return;
+            if (_decoder == null || _decoder.IsFinished || !_decoder.IsRunning)
+            {
+                if (!string.IsNullOrEmpty(_currentFilePath))
+                    PlayFile(_currentFilePath);
+                return;
+            }
+
             if (_decoder.IsPlaying)
             {
                 _decoder.Pause();
@@ -530,13 +1119,6 @@ namespace JonPlayer
             }
             else
             {
-                if (!_decoder.IsRunning)
-                {
-                    if (!string.IsNullOrEmpty(_currentFilePath))
-                        PlayFile(_currentFilePath);
-                    return;
-                }
-                
                 _decoder.Play();
                 _waveOut?.Play();
                 UpdatePlayPauseUI(true);
@@ -571,7 +1153,15 @@ namespace JonPlayer
                 double currentRatio = SliderTimeline.Value / 1000.0;
                 double currentSeconds = currentRatio * totalSeconds;
                 double targetSeconds = Math.Clamp(currentSeconds + offsetSeconds, 0, totalSeconds);
-                _decoder.Seek(targetSeconds / totalSeconds);
+                double targetRatio = targetSeconds / totalSeconds;
+                
+                _isUpdatingFromPlayer = true;
+                SliderTimeline.Value = targetRatio * 1000.0;
+                if (SliderTimelineFS != null) SliderTimelineFS.Value = targetRatio * 1000.0;
+                _isUpdatingFromPlayer = false;
+
+                _isSeeking = true;
+                _decoder.Seek(targetRatio);
                 _seekCount++;
             }
         }
@@ -600,26 +1190,9 @@ namespace JonPlayer
             }
         }
 
-        private void SliderTimeline_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        private void SliderTimeline_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
         {
-            if (e.OriginalSource is System.Windows.Controls.Primitives.Thumb)
-            {
-                _isUserDraggingSlider = true;
-                return;
-            }
-
-            if (sender is Slider slider)
-            {
-                double ratio = e.GetPosition(slider).X / slider.ActualWidth;
-                double targetValue = Math.Clamp(ratio * slider.Maximum, 0, slider.Maximum);
-                
-                _isUserDraggingSlider = true;
-                slider.Value = targetValue;
-                DoSeek(targetValue);
-                _isUserDraggingSlider = false;
-
-                e.Handled = true;
-            }
+            _isUserDraggingSlider = true;
         }
 
         private void SliderTimeline_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
@@ -628,50 +1201,37 @@ namespace JonPlayer
             if (sender is Slider slider) DoSeek(slider.Value);
         }
 
-        private void SliderTimelineFS_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        private void Decoder_RotationDetected(double rotation)
         {
-            if (e.OriginalSource is System.Windows.Controls.Primitives.Thumb)
+            Dispatcher.BeginInvoke(() =>
             {
-                _isUserDraggingSlider = true;
-                return;
-            }
-
-            if (sender is Slider slider)
-            {
-                double ratio = e.GetPosition(slider).X / slider.ActualWidth;
-                double targetValue = Math.Clamp(ratio * slider.Maximum, 0, slider.Maximum);
-                
-                _isUserDraggingSlider = true;
-                slider.Value = targetValue;
-                DoSeek(targetValue);
-                _isUserDraggingSlider = false;
-
-                e.Handled = true;
-            }
-        }
-
-        private void SliderTimelineFS_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
-        {
-            _isUserDraggingSlider = false;
-            if (sender is Slider slider) DoSeek(slider.Value);
-        }
-
-        private void Decoder_PlaybackFinished()
-        {
-            Dispatcher.BeginInvoke(new Action(() =>
-            {
-                BtnStop_Click(this, new RoutedEventArgs());
-            }));
+                if (VideoRotation != null)
+                {
+                    // If video was recorded vertically but stored sideways, apply the metadata rotation
+                    VideoRotation.Angle = rotation;
+                }
+            });
         }
 
         private void SliderTimeline_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (_isUpdatingFromPlayer) return;
-            if (SliderTimelineFS != null)
+            if (SliderTimelineFS != null && sender == SliderTimeline)
             {
                 _isUpdatingFromPlayer = true;
                 SliderTimelineFS.Value = SliderTimeline.Value;
                 _isUpdatingFromPlayer = false;
+            }
+            else if (SliderTimeline != null && sender == SliderTimelineFS)
+            {
+                _isUpdatingFromPlayer = true;
+                SliderTimeline.Value = SliderTimelineFS.Value;
+                _isUpdatingFromPlayer = false;
+            }
+
+            if (!_isUserDraggingSlider)
+            {
+                DoSeek(e.NewValue);
             }
         }
 
@@ -685,8 +1245,17 @@ namespace JonPlayer
 
         private void DoSeek(double sliderValue)
         {
+            _isSeeking = true;
             _decoder?.Seek(sliderValue / 1000.0);
             _seekCount++;
+        }
+
+        private void Decoder_SeekPerformed()
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                _isSeeking = false;
+            });
         }
 
         private void SliderVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -733,17 +1302,90 @@ namespace JonPlayer
                 if (MuteIconPath != null) MuteIconPath.Data = muteGeom;
                 if (MuteIconPathFS != null) MuteIconPathFS.Data = muteGeom;
             }
+            if (_isFullscreen) ShowFsVolumeOverlay();
         }
 
-        private void AdjustVolume(int delta) => SliderVolume.Value = Math.Clamp(SliderVolume.Value + delta, 0, 100);
+        private void AdjustVolume(int delta)
+        {
+            SliderVolume.Value = Math.Clamp(SliderVolume.Value + delta, 0, 100);
+            if (_isFullscreen) ShowFsVolumeOverlay();
+        }
+
+        private void ShowFsVolumeOverlay()
+        {
+            if (!_isFullscreen) return;
+            
+            double vol = SliderVolume.Value;
+            
+            if (_isMuted)
+            {
+                TxtFsVolume.Text = "Mute";
+                IconFsVolume.Data = (Geometry)FindResource("MuteIcon");
+                FsVolumeFill.Height = 0;
+            }
+            else
+            {
+                TxtFsVolume.Text = $"{(int)vol}%";
+                string geometryKey = vol switch { 0 => "MuteIcon", < 35 => "VolumeLowIcon", _ => "VolumeHighIcon" };
+                IconFsVolume.Data = (Geometry)FindResource(geometryKey);
+                
+                double trackHeight = FsVolumeTrack.ActualHeight > 0 ? FsVolumeTrack.ActualHeight : 140;
+                FsVolumeFill.Height = (vol / 100.0) * trackHeight;
+            }
+            
+            OverlayFsVolume.Visibility = Visibility.Visible;
+            _fsVolumeTimer.Stop();
+            _fsVolumeTimer.Start();
+        }
 
         private void BtnFullscreen_Click    (object sender, RoutedEventArgs e) => EnterFullscreen();
         private void BtnExitFullscreen_Click(object sender, RoutedEventArgs e) => ExitFullscreen();
+
+        private void BtnFsCloseVideo_Click(object sender, RoutedEventArgs e)
+        {
+            if (_isFullscreen) this.Close();
+        }
 
         private void ToggleFullscreen()
         {
             if (_isFullscreen) ExitFullscreen();
             else EnterFullscreen();
+        }
+
+        private void FitScreen()
+        {
+            if (_isFullscreen) ExitFullscreen();
+            this.WindowState = this.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+        }
+
+        private void ResizeScreen(double scale)
+        {
+            if (_isFullscreen) ExitFullscreen();
+            if (this.WindowState == WindowState.Maximized) this.WindowState = WindowState.Normal;
+            
+            if (_decoder != null && _decoder.Width > 0 && _decoder.Height > 0)
+            {
+                this.Width = _decoder.Width * scale;
+                this.Height = _decoder.Height * scale + 60; // add some height for the control bar
+            }
+        }
+
+        private void CloseFile()
+        {
+            if (_decoder != null)
+            {
+                _decoder.Stop();
+                _decoder.Dispose();
+                _decoder = null;
+            }
+            if (_renderer != null)
+            {
+                _renderer.Dispose();
+                _renderer = null;
+            }
+            if (VideoElement != null) VideoElement.Source = null;
+            _currentFilePath = null;
+            this.Title = "JonPlayer";
         }
 
         private bool _isChangingFullscreen = false;
@@ -758,6 +1400,7 @@ namespace JonPlayer
             _prevWindowState = WindowState;
             _prevWindowStyle = WindowStyle;
             _prevResizeMode  = ResizeMode;
+            _prevTopmost     = Topmost;
 
             var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
             if (chrome != null)
@@ -771,6 +1414,7 @@ namespace JonPlayer
             
             WindowState  = WindowState.Normal;
             WindowState  = WindowState.Maximized;
+            Topmost      = true;
 
             RowTitleBar.Height = new GridLength(0);
             RowTimeline.Height = new GridLength(0);
@@ -787,6 +1431,7 @@ namespace JonPlayer
                 VideoGrid.UpdateLayout();
                 PopupFsExit.IsOpen = false;
                 FsBottomStrip.Visibility = Visibility.Collapsed;
+                BtnFsCloseVideo.Visibility = Visibility.Visible;
                 _fsMousePollTimer.Start();
             }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
@@ -804,6 +1449,7 @@ namespace JonPlayer
             WindowStyle = _prevWindowStyle;
             WindowState = _prevWindowState;
             ResizeMode  = _prevResizeMode;
+            Topmost     = _prevTopmost;
             _isChangingFullscreen = false;
 
             if (WindowState == WindowState.Maximized)
@@ -832,6 +1478,7 @@ namespace JonPlayer
 
             PopupFsExit.IsOpen = false;
             FsBottomStrip.Visibility = Visibility.Collapsed;
+            BtnFsCloseVideo.Visibility = Visibility.Collapsed;
             _fsMousePollTimer.Stop();
         }
 
@@ -839,22 +1486,98 @@ namespace JonPlayer
         {
             if (e.OriginalSource is WpfTextBox || e.OriginalSource is WpfComboBox) return;
 
+            bool isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+            bool isShift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+
             switch (e.Key)
             {
                 case Key.Space: TogglePlayPause(); e.Handled = true; break;
-                case Key.Left: SeekRelative(-10); e.Handled = true; break;
-                case Key.Right: SeekRelative( 10); e.Handled = true; break;
-                case Key.Up: AdjustVolume( 5); e.Handled = true; break;
-                case Key.Down: AdjustVolume(-5); e.Handled = true; break;
+                
+                case Key.Left: 
+                    if (isCtrl) SeekRelative(-30);
+                    else SeekRelative(-5); 
+                    e.Handled = true; break;
+                    
+                case Key.Right: 
+                    if (isCtrl) SeekRelative(30);
+                    else SeekRelative(5); 
+                    e.Handled = true; break;
+                    
+                case Key.Up: 
+                    if (PlaylistOverlay.Visibility == Visibility.Visible)
+                    {
+                        if (ListPlaylist.SelectedIndex > 0)
+                            ListPlaylist.SelectedIndex--;
+                        else if (ListPlaylist.Items.Count > 0)
+                            ListPlaylist.SelectedIndex = ListPlaylist.Items.Count - 1;
+                        if (ListPlaylist.SelectedItem != null) ListPlaylist.ScrollIntoView(ListPlaylist.SelectedItem);
+                        StartPlaylistHideTimer();
+                    }
+                    else
+                    {
+                        AdjustVolume(5);
+                    }
+                    e.Handled = true; break;
+
+                case Key.Down: 
+                    if (PlaylistOverlay.Visibility == Visibility.Visible)
+                    {
+                        if (ListPlaylist.SelectedIndex < ListPlaylist.Items.Count - 1)
+                            ListPlaylist.SelectedIndex++;
+                        else if (ListPlaylist.Items.Count > 0)
+                            ListPlaylist.SelectedIndex = 0;
+                        if (ListPlaylist.SelectedItem != null) ListPlaylist.ScrollIntoView(ListPlaylist.SelectedItem);
+                        StartPlaylistHideTimer();
+                    }
+                    else
+                    {
+                        AdjustVolume(-5);
+                    }
+                    e.Handled = true; break;
+                
                 case Key.M: ToggleMute(); e.Handled = true; break;
                 case Key.F11: ToggleFullscreen(); e.Handled = true; break;
+                case Key.Enter: 
+                    if (PlaylistOverlay.Visibility == Visibility.Visible)
+                    {
+                        if (ListPlaylist.SelectedItem is PlaylistItem item)
+                        {
+                            PlayFile(item.Path);
+                            _playlistIndex = _playlist.IndexOf(item);
+                            UpdateNowPlayingHighlight();
+                            StartPlaylistHideTimer();
+                        }
+                    }
+                    else
+                    {
+                        ToggleFullscreen();
+                    }
+                    e.Handled = true; break;
+                
                 case Key.F3: ToggleStatsOverlay(); e.Handled = true; break;
+                
                 case Key.Escape:
                     if (_isFullscreen) { ExitFullscreen(); e.Handled = true; }
                     break;
+                    
+                case Key.F: FitScreen(); e.Handled = true; break;
+                case Key.D1:
+                case Key.NumPad1: ResizeScreen(1.0); e.Handled = true; break;
+                case Key.D2:
+                case Key.NumPad2: ResizeScreen(2.0); e.Handled = true; break;
+                
                 case Key.O:
-                    if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
-                    { OpenFile(); e.Handled = true; }
+                    if (isCtrl && isShift) { OpenFolder(); e.Handled = true; }
+                    else if (isCtrl) { OpenFile(); e.Handled = true; }
+                    break;
+                    
+                case Key.W:
+                    if (isCtrl) { CloseFile(); e.Handled = true; }
+                    break;
+                    
+                case Key.F9: TogglePlaylist(); e.Handled = true; break;
+                case Key.L:
+                    if (isCtrl) { TogglePlaylist(); e.Handled = true; }
                     break;
             }
         }
@@ -916,7 +1639,9 @@ namespace JonPlayer
             sb.AppendLine($"{"Codec".PadRight(12)}{codec}");
             sb.AppendLine($"{"Resolution".PadRight(12)}{res}");
             sb.AppendLine($"{"FPS".PadRight(12)}{stats.ActualFps:F1} / {stats.TargetFps:F1}");
-            sb.AppendLine($"{"Dropped".PadRight(12)}0");
+            sb.AppendLine($"{"Dropped".PadRight(12)}{stats.DroppedFrames}");
+            sb.AppendLine($"{"Bitrate".PadRight(12)}{stats.Bitrate / 1000} kbps");
+            sb.AppendLine($"{"HW Accel".PadRight(12)}{(stats.IsHwAccel ? "Active (D3D11)" : "Inactive (CPU)")}");
             sb.AppendLine();
             
             sb.AppendLine("Performance");
@@ -928,8 +1653,8 @@ namespace JonPlayer
             
             sb.AppendLine("Buffer");
             sb.AppendLine("────────────────────");
-            sb.AppendLine($"{"PacketQ".PadRight(12)}0");
-            sb.AppendLine($"{"FrameQ".PadRight(12)}0");
+            sb.AppendLine($"{"PacketQ".PadRight(12)}{stats.PacketQueueSize}");
+            sb.AppendLine($"{"AudioQ".PadRight(12)}{stats.AudioQueueSize}");
             sb.AppendLine();
             
             sb.AppendLine("Sync");

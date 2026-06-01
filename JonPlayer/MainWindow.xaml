@@ -36,10 +36,11 @@
         <Geometry x:Key="MuteIcon">M 19,12 L 22,9 L 20.6,7.6 L 17.6,10.6 L 14.6,7.6 L 13.2,9 L 16.2,12 L 13.2,15 L 14.6,16.4 L 17.6,13.4 L 20.6,16.4 L 22,15 Z M 3,9 V 15 H 7 L 12,20 V 4 L 7,9 Z</Geometry>
         <Geometry x:Key="VolumeLowIcon">M 3,9 V 15 H 7 L 12,20 V 4 L 7,9 H 3 Z M 16.5,12 C 16.5,10.2 15.5,8.7 14,8 V 16 C 15.5,15.3 16.5,13.8 16.5,12 Z</Geometry>
         <Geometry x:Key="VolumeHighIcon">M 3,9 V 15 H 7 L 12,20 V 4 L 7,9 H 3 Z M 16.5,12 C 16.5,10.2 15.5,8.7 14,8 V 16 C 15.5,15.3 16.5,13.8 16.5,12 Z M 14,3.2 V 5.3 C 16.9,6.1 19,8.8 19,12 C 19,15.2 16.9,17.9 14,18.7 V 20.8 C 18,19.9 21,16.3 21,12 C 21,7.7 18,4.1 14,3.2 Z</Geometry>
-        <Geometry x:Key="SunIcon">M 12,7 A 5,5 0 1,0 12,17 A 5,5 0 1,0 12,7 M 12,1 V 3 M 12,21 V 23 M 4.22,4.22 L 5.64,5.64 M 18.36,18.36 L 19.78,19.78 M 1,12 H 3 M 21,12 H 23 M 4.22,19.78 L 5.64,18.36 M 18.36,5.64 L 19.78,4.22</Geometry>
+        <Geometry x:Key="SunIcon">M12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,2L14.39,5.42C13.65,5.15 12.84,5 12,5C11.16,5 10.35,5.15 9.61,5.42L12,2M3.34,7L7.5,6.65C6.9,7.16 6.36,7.78 5.94,8.5C5.5,9.24 5.25,10 5.11,10.79L3.34,7M3.36,17L5.12,13.23C5.26,14 5.53,14.78 5.95,15.5C6.37,16.24 6.91,16.86 7.5,17.37L3.36,17M20.65,7L18.88,10.79C18.74,10 18.47,9.23 18.05,8.5C17.63,7.78 17.1,7.15 16.5,6.64L20.65,7M20.64,17L16.5,17.36C17.09,16.85 17.62,16.22 18.04,15.5C18.46,14.77 18.73,14 18.87,13.22L20.64,17M12,22L9.61,18.56C10.36,18.83 11.16,19 12,19C12.84,19 13.65,18.83 14.39,18.56L12,22Z</Geometry>
         <Geometry x:Key="MoonIcon">M 12,3 C 11.2,3 10.5,3.1 9.7,3.3 C 12.8,5.4 14.8,9 14.8,13 C 14.8,17 12.8,20.6 9.7,22.7 C 10.5,22.9 11.2,23 12,23 C 17.5,23 22,18.5 22,13 C 22,7.5 17.5,3 12,3 Z</Geometry>
         <Geometry x:Key="FullscreenIcon">M 7,14 H 5 V 19 H 10 V 17 H 7 Z M 5,10 H 7 V 7 H 10 V 5 H 5 Z M 17,17 H 14 V 19 H 19 V 14 H 17 Z M 14,5 V 7 H 17 V 10 H 19 V 5 Z</Geometry>
         <Geometry x:Key="ExitFullscreenIcon">M 5,16 H 8 V 19 H 10 V 14 H 5 Z M 8,8 H 5 V 10 H 10 V 5 H 8 Z M 16,14 H 19 V 16 H 14 V 19 H 16 Z M 19,8 H 16 V 5 H 14 V 10 H 19 Z</Geometry>
+        <Geometry x:Key="PlaylistIcon">M 3,6 H 15 V 8 H 3 Z M 3,11 H 15 V 13 H 3 Z M 3,16 H 11 V 18 H 3 Z M 15,16 V 21 L 20,18.5 Z</Geometry>
 
         <SolidColorBrush x:Key="BgBrush"        Color="#111111"/>
         <SolidColorBrush x:Key="PanelBrush"     Color="#1A1A1A"/>
@@ -55,6 +56,63 @@
             <GradientStop Color="#5E5E62" Offset="0.8"/>
             <GradientStop Color="#2C2C2F" Offset="1.0"/>
         </LinearGradientBrush>
+
+        <Style x:Key="ThinScrollBarStyle" TargetType="ScrollBar">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="3"/>
+            <Setter Property="MinWidth" Value="3"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="Transparent" Width="3" HorizontalAlignment="Right">
+                            <Track x:Name="PART_Track" IsDirectionReversed="true" Width="3">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.LineUpCommand" Opacity="0" Focusable="False" IsTabStop="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Background="Transparent"/>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.DecreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Cursor="Arrow" Width="3">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border x:Name="ThumbBd" CornerRadius="1.5" Width="3"
+                                                        Background="#66FFFFFF" Margin="0">
+                                                    <VisualStateManager.VisualStateGroups>
+                                                        <VisualStateGroup x:Name="CommonStates">
+                                                            <VisualState x:Name="Normal"/>
+                                                            <VisualState x:Name="MouseOver">
+                                                                <Storyboard>
+                                                                    <ColorAnimation Storyboard.TargetName="ThumbBd"
+                                                                                    Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                                                    To="#AAFFFFFF" Duration="0:0:0.15"/>
+                                                                </Storyboard>
+                                                            </VisualState>
+                                                        </VisualStateGroup>
+                                                    </VisualStateManager.VisualStateGroups>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.LineDownCommand" Opacity="0" Focusable="False" IsTabStop="False">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Background="Transparent"/>
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <Style x:Key="TitleBarButton" TargetType="Button">
             <Setter Property="Background"   Value="Transparent"/>
@@ -374,6 +432,8 @@
         <Style x:Key="SpeedCapsule" TargetType="Button">
             <Setter Property="Background"      Value="Transparent"/>
             <Setter Property="Foreground"      Value="{DynamicResource TextBrush}"/>
+            <Setter Property="FontFamily"      Value="Impact"/>
+            <Setter Property="FontSize"        Value="13"/>
             <Setter Property="Width"           Value="64"/>
             <Setter Property="Height"          Value="28"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -471,7 +531,7 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
                     <Image Source="Assets/logo.png" Height="26" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                    <TextBlock FontSize="15" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"><Run Text="Jon" Foreground="White"/><Run Text="Player">
+                    <TextBlock FontSize="15" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"><Run Text="Jon" Foreground="{DynamicResource TextBrush}"/><Run Text="Player">
                             <Run.Foreground>
                                 <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                                     <GradientStop Color="#00E5FF" Offset="0"/>
@@ -479,9 +539,13 @@
                                 </LinearGradientBrush>
                             </Run.Foreground>
                         </Run></TextBlock>
-                    <Image Source="Assets/aptiv_logo.png" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="4,1,0,0">
+                        <TextBlock Text="●" Foreground="#FF4500" FontSize="5" VerticalAlignment="Center" Margin="0,0,3,0"/>
+                        <TextBlock Text="A P T I V" Foreground="{DynamicResource TextBrush}" FontSize="13" FontWeight="SemiBold" FontFamily="Montserrat" VerticalAlignment="Center"/>
+                        <TextBlock Text="●" Foreground="#FF4500" FontSize="5" VerticalAlignment="Center" Margin="3,0,0,0"/>
+                    </StackPanel>
                 </StackPanel>
-                <TextBlock x:Name="TxtNowPlaying" Grid.Column="1" Text="No file loaded" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="10,0"/>
+                <TextBlock x:Name="TxtNowPlaying" Grid.Column="1" Text="Pick Your Vibe" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="10,0"/>
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                     <Button Style="{StaticResource TitleBarButton}" Content="⚊" ToolTip="Minimize" Click="BtnMinimize_Click"/>
                     <Button x:Name="BtnMaximize" Style="{StaticResource TitleBarButton}" Content="⬜" ToolTip="Maximize" Click="BtnMaximize_Click"/>
@@ -491,14 +555,298 @@
         </Border>
 
         <Grid x:Name="VideoGrid" Grid.Row="1" Background="Black">
-            <Image x:Name="VideoElement" Stretch="Uniform" Visibility="Collapsed"/>
-            <Image x:Name="ImgSplash" Stretch="Uniform" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+            <Image x:Name="VideoElement" Stretch="Uniform" Visibility="Collapsed">
+                <Image.LayoutTransform>
+                    <RotateTransform x:Name="VideoRotation" Angle="0"/>
+                </Image.LayoutTransform>
+            </Image>
+            <Image x:Name="ImgSplash" Stretch="None" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+
+            <Grid x:Name="AudioUI" Visibility="Collapsed">
+                <Image x:Name="AudioCoverBackground" Stretch="UniformToFill">
+                    <Image.Effect>
+                        <BlurEffect Radius="50" KernelType="Gaussian"/>
+                    </Image.Effect>
+                </Image>
+                <Rectangle Fill="#88000000"/> 
+                <Grid VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,60">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    
+                    <Border CornerRadius="12" Margin="0,0,0,30" HorizontalAlignment="Center">
+                        <Border.Effect>
+                            <DropShadowEffect BlurRadius="20" ShadowDepth="10" Opacity="0.5" Direction="270"/>
+                        </Border.Effect>
+                        <Grid>
+                            <Rectangle Fill="#22FFFFFF" RadiusX="12" RadiusY="12"/>
+                            <Image x:Name="AudioCoverForeground" Width="250" Height="250" Stretch="UniformToFill">
+                                <Image.Clip>
+                                    <RectangleGeometry Rect="0,0,250,250" RadiusX="12" RadiusY="12"/>
+                                </Image.Clip>
+                            </Image>
+                        </Grid>
+                    </Border>
+                    
+                    <TextBlock x:Name="TxtAudioTitle" Grid.Row="1" Text="" Foreground="White" FontSize="28" FontWeight="Bold" FontFamily="Montserrat" HorizontalAlignment="Center" Margin="0,0,0,5" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="600"/>
+                    <TextBlock x:Name="TxtAudioArtist" Grid.Row="2" Text="" Foreground="#DDDDDD" FontSize="18" FontWeight="Medium" FontFamily="Montserrat" HorizontalAlignment="Center" Margin="0,0,0,5" MaxWidth="600" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="TxtAudioAlbum" Grid.Row="3" Text="" Foreground="#AAAAAA" FontSize="14" FontFamily="Montserrat" HorizontalAlignment="Center" MaxWidth="600" TextTrimming="CharacterEllipsis"/>
+                </Grid>
+            </Grid>
 
             <Rectangle x:Name="MouseLayer" Fill="Transparent" IsHitTestVisible="True" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
 
             <Border x:Name="OverlayStats" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="10" Background="#CC000000" CornerRadius="5" IsHitTestVisible="False" Visibility="Collapsed" Panel.ZIndex="100">
                 <TextBlock x:Name="TxtOverlayStats" Foreground="#00FF00" FontFamily="Consolas" FontSize="12" LineHeight="18" Text="Stats..." />
             </Border>
+
+            <!-- Fullscreen Close Button -->
+            <Button x:Name="BtnFsCloseVideo" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,30,30,0" Width="40" Height="40" Click="BtnFsCloseVideo_Click" Visibility="Collapsed" Panel.ZIndex="100" Cursor="Hand" ToolTip="Close App">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bg" Background="Transparent" CornerRadius="20">
+                            <Path Data="M 12 12 L 28 28 M 28 12 L 12 28" Stroke="White" StrokeThickness="3" StrokeEndLineCap="Round" StrokeStartLineCap="Round" Opacity="0" x:Name="icon"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#44000000"/>
+                                <Setter TargetName="icon" Property="Opacity" Value="0.8"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Button.Template>
+            </Button>
+
+            <!-- Fullscreen Glassmorphism Volume Bar -->
+            <Border x:Name="OverlayFsVolume" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="30,0,0,0" Width="44" Height="220" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="1" CornerRadius="22" Opacity="0.55" Visibility="Collapsed" Panel.ZIndex="100">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Path x:Name="IconFsVolume" Data="{StaticResource VolumeHighIcon}" Fill="{DynamicResource TextBrush}" Width="16" Height="16" Stretch="Uniform" Margin="0,16,0,0" Grid.Row="0"/>
+                    <Border x:Name="FsVolumeTrack" Grid.Row="1" Margin="18,10,18,10" Background="#33FFFFFF" CornerRadius="2">
+                        <Border x:Name="FsVolumeFill" VerticalAlignment="Bottom" Background="#1DB954" Height="0" CornerRadius="2"/>
+                    </Border>
+                    <TextBlock x:Name="TxtFsVolume" Text="50" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,16" Grid.Row="2"/>
+                </Grid>
+            </Border>
+
+            <!-- Glassmorphism Playlist Popup (draggable) -->
+            <Border x:Name="PlaylistOverlay"
+                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                    Margin="10,10,10,100"
+                    Width="300" MaxHeight="420"
+                    Visibility="Collapsed"
+                    Panel.ZIndex="100"
+                    MouseEnter="PlaylistOverlay_MouseEnter"
+                    MouseLeave="PlaylistOverlay_MouseLeave"
+                    RenderTransformOrigin="0.5,0.5">
+                <Border.RenderTransform>
+                    <TranslateTransform x:Name="PlaylistTranslate" X="0" Y="0"/>
+                </Border.RenderTransform>
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="24" ShadowDepth="6" Direction="270" Color="#000000" Opacity="0.55"/>
+                </Border.Effect>
+                <!-- Outer glass border -->
+                <Border CornerRadius="14"
+                        BorderBrush="{DynamicResource PlaylistBorderBrush}"
+                        BorderThickness="1"
+                        ClipToBounds="True">
+                    <Border.Background>
+                        <SolidColorBrush Color="Transparent" />
+                    </Border.Background>
+                    <Grid Background="{DynamicResource PlaylistBgBrush}">
+                        <!-- Subtle top gloss highlight -->
+                        <Border CornerRadius="14,14,0,0" Height="50" VerticalAlignment="Top" IsHitTestVisible="False">
+                            <Border.Background>
+                                <SolidColorBrush Color="Transparent" />
+                            </Border.Background>
+                            <Border Background="{DynamicResource PlaylistTopGlossBrush}"/>
+                        </Border>
+
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Drag handle / title bar -->
+                            <Border Grid.Row="0" CornerRadius="14,14,0,0"
+                                    Cursor="SizeAll"
+                                    MouseLeftButtonDown="PlaylistOverlay_DragStart"
+                                    MouseMove="PlaylistOverlay_DragMove"
+                                    MouseLeftButtonUp="PlaylistOverlay_DragEnd"
+                                    Padding="12,10,10,8">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                        <GradientStop Color="#221DB954" Offset="0"/>
+                                        <GradientStop Color="#00000000" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <Grid>
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <!-- Drag grip dots -->
+                                        <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,8,0" IsHitTestVisible="False">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,2"/>
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,2"/>
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,0"/>
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,0"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <TextBlock Text="Playlist" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" FontSize="13" VerticalAlignment="Center"/>
+                                        <Border Background="#331DB954" CornerRadius="8" Padding="6,2" Margin="8,0,0,0" VerticalAlignment="Center">
+                                            <TextBlock x:Name="TxtPlaylistCount" Text="0" Foreground="#1DB954" FontSize="10" FontWeight="Bold"/>
+                                        </Border>
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                        <Button Width="26" Height="26" Margin="0,0,4,0" ToolTip="Add Files" Click="BtnPlaylistAdd_Click" Cursor="Hand" Focusable="False"
+                                                Background="#28FFFFFF" BorderThickness="0">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="13">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="bd" Property="Background" Value="#441DB954"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                            <TextBlock Text="+" Foreground="{DynamicResource TextBrush}" FontWeight="Bold" FontSize="14" VerticalAlignment="Center"/>
+                                        </Button>
+                                        <Button Width="26" Height="26" ToolTip="Close Playlist" Click="BtnPlaylistClose_Click" Cursor="Hand" Focusable="False"
+                                                Background="#28FFFFFF" BorderThickness="0">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="13">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="bd" Property="Background" Value="#44FF4444"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                            <TextBlock Text="✕" Foreground="#AAAAAA" FontSize="11" VerticalAlignment="Center"/>
+                                        </Button>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- Thin divider -->
+                            <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom" IsHitTestVisible="False">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                        <GradientStop Color="#00FFFFFF" Offset="0"/>
+                                        <GradientStop Color="#30FFFFFF" Offset="0.5"/>
+                                        <GradientStop Color="#00FFFFFF" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                            </Border>
+
+                            <!-- Playlist Items -->
+                            <ListBox x:Name="ListPlaylist" Grid.Row="1"
+                                     Background="Transparent" BorderThickness="0"
+                                     Foreground="{DynamicResource TextBrush}" Margin="4,4,4,4"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                     MouseDoubleClick="ListPlaylist_MouseDoubleClick"
+                                     PreviewKeyDown="ListPlaylist_PreviewKeyDown">
+                                <ListBox.Resources>
+                                    <Style TargetType="ScrollBar" BasedOn="{StaticResource ThinScrollBarStyle}"/>
+                                </ListBox.Resources>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,1">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <!-- Now playing indicator bar -->
+                                            <Border Grid.Column="0" Width="3" CornerRadius="1.5"
+                                                    Margin="0,3,6,3" VerticalAlignment="Stretch"
+                                                    Background="{Binding IsCurrentlyPlaying, Converter={x:Static local:BoolToAccentBrushConverter.Instance}}"/>
+                                            <StackPanel Grid.Column="1" Orientation="Vertical" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                                           FontSize="12" Padding="0,4,4,4" VerticalAlignment="Center">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsCurrentlyPlaying}" Value="True">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2" Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,2,0">
+                                                <Button Content="▲" FontSize="8" Foreground="{DynamicResource TextMutedBrush}" Background="Transparent" BorderThickness="0" Padding="3,1" Cursor="Hand" Click="BtnMoveUp_Click" Focusable="False"/>
+                                                <Button Content="▼" FontSize="8" Foreground="{DynamicResource TextMutedBrush}" Background="Transparent" BorderThickness="0" Padding="3,1" Cursor="Hand" Click="BtnMoveDown_Click" Focusable="False"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem">
+                                        <Setter Property="Padding" Value="0"/>
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="ListBoxItem">
+                                                    <Border x:Name="Bd" Background="Transparent" CornerRadius="6" Padding="4,1" Margin="2,1">
+                                                        <ContentPresenter/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="Bd" Property="Background" Value="#22FFFFFF"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsSelected" Value="True">
+                                                            <Setter TargetName="Bd" Property="Background" Value="#33FFFFFF"/>
+                                                        </Trigger>
+                                                        <DataTrigger Binding="{Binding IsCurrentlyPlaying}" Value="True">
+                                                            <Setter TargetName="Bd" Property="Background" Value="#221DB954"/>
+                                                        </DataTrigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                            </ListBox>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Border>
+
+            <Button x:Name="NextVideoOverlay" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,20,90" Background="#CC000000" Visibility="Collapsed" Panel.ZIndex="100" BorderBrush="#33FFFFFF" BorderThickness="1" Padding="10" Cursor="Hand" Click="NextVideoOverlay_Click">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter/>
+                        </Border>
+                    </ControlTemplate>
+                </Button.Template>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Move to Next" Foreground="#88FFFFFF" FontSize="11" Margin="0,0,0,4"/>
+                    <StackPanel Orientation="Horizontal">
+                        <Border Width="32" Height="32" Background="#44FFFFFF" CornerRadius="4" Margin="0,0,8,0">
+                            <Path Data="{StaticResource PlayIcon}" Fill="White" Stretch="Uniform" Width="12" Height="12"/>
+                        </Border>
+                        <TextBlock x:Name="TxtNextVideoName" Text="Video Name.mp4" Foreground="White" FontSize="13" VerticalAlignment="Center" MaxWidth="200" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                </StackPanel>
+            </Button>
 
             <Popup x:Name="PopupFsExit" PlacementTarget="{Binding ElementName=VideoGrid}" Placement="Top" AllowsTransparency="True" StaysOpen="True">
                 <Border x:Name="FsExitBadge" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,14,0,0" Background="#CC000000" BorderBrush="#55FFFFFF" BorderThickness="1" CornerRadius="14" Padding="14,6" MouseEnter="FsExitBadge_MouseEnter" MouseLeave="FsExitBadge_MouseLeave">
@@ -522,50 +870,55 @@
                 </Border>
             </Popup>
 
-            <Border x:Name="FsBottomStrip" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Background="#E2111111" BorderBrush="#33FFFFFF" BorderThickness="0,1,0,0" Padding="14,8" MouseEnter="FsBottomStrip_MouseEnter" MouseLeave="FsBottomStrip_MouseLeave" Visibility="Collapsed">
-                <StackPanel Orientation="Vertical">
+            <Grid x:Name="FsBottomStrip" HorizontalAlignment="Stretch" MaxWidth="960" MinWidth="750" VerticalAlignment="Bottom" Margin="0,0,0,20" MouseEnter="FsBottomStrip_MouseEnter" MouseLeave="FsBottomStrip_MouseLeave" Visibility="Collapsed">
+                <Border Background="{DynamicResource PanelBrush}" CornerRadius="16" Opacity="0.7"/>
+                <Border BorderBrush="{DynamicResource DividerBrush}" BorderThickness="1" CornerRadius="16" Padding="24,12">
+                    <StackPanel Orientation="Vertical">
                     <Grid Margin="0,0,0,8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock x:Name="TxtCurrentTimeFS" Grid.Column="0" Text="00:00:00" Foreground="#BBFFFFFF" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <Slider x:Name="SliderTimelineFS" Grid.Column="1" Style="{StaticResource FsTimelineSlider}" Minimum="0" Maximum="1000" Value="0" Thumb.DragCompleted="SliderTimelineFS_DragCompleted" PreviewMouseLeftButtonDown="SliderTimelineFS_PreviewMouseDown" ValueChanged="SliderTimelineFS_ValueChanged" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="TxtTotalTimeFS" Grid.Column="2" Text="00:00:00" Foreground="#BBFFFFFF" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                        <TextBlock x:Name="TxtCurrentTimeFS" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <Slider x:Name="SliderTimelineFS" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsMoveToPointEnabled="True" Thumb.DragStarted="SliderTimeline_DragStarted" Thumb.DragCompleted="SliderTimeline_DragCompleted" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TxtTotalTimeFS" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </Grid>
                     <Grid>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Open File" Click="BtnOpen_Click">
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
                                 <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                            </Button>
+                            <Button x:Name="BtnPlaylistToggleFS" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False">
+                                <Path Data="{StaticResource PlaylistIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="16" Height="16" Stretch="Uniform"/>
                             </Button>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource PrevIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Rewind 10s" Click="BtnSkipBack_Click" Margin="0,0,6,0">
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Rewind 10s" Click="BtnSkipBack_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource RewindIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Button x:Name="BtnPlayPauseFS" Style="{StaticResource FsKnobButton}" Width="44" Height="44" ToolTip="Play/Pause" Click="BtnPlayPause_Click" Margin="0,0,6,0">
+                            <Button x:Name="BtnPlayPauseFS" Style="{StaticResource KnobButton}" Width="44" Height="44" ToolTip="Play/Pause" Click="BtnPlayPause_Click" Margin="0,0,6,0">
                                 <Path x:Name="PlayPauseIconPathFS" Data="{StaticResource PlayIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform"/>
                             </Button>
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Stop" Click="BtnStop_Click" Margin="0,0,6,0">
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Stop" Click="BtnStop_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource StopIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Forward 10s" Click="BtnSkipForward_Click" Margin="0,0,6,0">
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Forward 10s" Click="BtnSkipForward_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource ForwardIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Next" Click="BtnNext_Click">
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Next" Click="BtnNext_Click">
                                 <Path Data="{StaticResource NextIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                            <Button x:Name="BtnMuteFS" Style="{StaticResource FsKnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
+                            <Button x:Name="BtnMuteFS" Style="{StaticResource KnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
                                 <Path x:Name="MuteIconPathFS" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Slider x:Name="SliderVolumeFS" Style="{StaticResource FsVolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                            <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedCapsule}" Foreground="White" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,8,0">
+                            <Slider x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedCapsule}" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,8,0">
                                 <Button.ContextMenu>
                                     <ContextMenu x:Name="MenuSpeedFS">
                                         <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
@@ -578,16 +931,17 @@
                                     </ContextMenu>
                                 </Button.ContextMenu>
                             </Button>
-                            <Button x:Name="BtnThemeFS" Style="{StaticResource FsKnobButton}" ToolTip="Toggle Theme" Click="BtnTheme_Click" Margin="0,0,5,0">
+                            <Button x:Name="BtnThemeFS" Style="{StaticResource KnobButton}" ToolTip="Toggle Theme" Click="BtnTheme_Click" Margin="0,0,5,0">
                                 <Path x:Name="ThemeIconPathFS" Data="{StaticResource MoonIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Button Style="{StaticResource FsKnobButton}" ToolTip="Exit Fullscreen (Esc)" Click="BtnExitFullscreen_Click">
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Exit Fullscreen (Esc)" Click="BtnExitFullscreen_Click">
                                 <Path Data="{StaticResource ExitFullscreenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
                         </StackPanel>
                     </Grid>
                 </StackPanel>
             </Border>
+        </Grid>
         </Grid>
 
         <Border Grid.Row="2" x:Name="TimelineBar" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="0,1,0,0" Padding="14,0">
@@ -597,17 +951,20 @@
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock x:Name="TxtCurrentTime" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <Slider x:Name="SliderTimeline" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" Thumb.DragCompleted="SliderTimeline_DragCompleted" PreviewMouseLeftButtonDown="SliderTimeline_PreviewMouseDown" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
-                <TextBlock x:Name="TxtTotalTime" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                <TextBlock x:Name="TxtCurrentTime" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" FontFamily="Consolas" VerticalAlignment="Center" Margin="14,0,8,0"/>
+                <Slider x:Name="SliderTimeline" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsMoveToPointEnabled="True" Thumb.DragStarted="SliderTimeline_DragStarted" Thumb.DragCompleted="SliderTimeline_DragCompleted" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
+                <TextBlock x:Name="TxtTotalTime" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,14,0"/>
             </Grid>
         </Border>
 
         <Border Grid.Row="3" x:Name="ControlBar" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="0,1,0,0" Padding="14,8">
             <Grid>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click">
+                    <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
                         <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                    </Button>
+                    <Button x:Name="BtnPlaylistToggle" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False">
+                        <Path Data="{StaticResource PlaylistIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="16" Height="16" Stretch="Uniform"/>
                     </Button>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
