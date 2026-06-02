@@ -45,6 +45,8 @@ namespace JonPlayer
 
         private ID3D11Texture2D? _d3d11DecodeTexture;
         private ID3D11Texture2D? _d3d11OffscreenTexture;
+        private ID3D11ShaderResourceView? _srvY;
+        private ID3D11ShaderResourceView? _srvUV;
 
         public IntPtr D3D11DevicePtr => _d3d11Device?.NativePointer ?? IntPtr.Zero;
         public IntPtr D3D11ContextPtr => _d3d11Context?.NativePointer ?? IntPtr.Zero;
@@ -340,6 +342,9 @@ namespace JonPlayer
                 {
                     ResetSize(trueWidth, trueHeight);
                     _d3d11DecodeTexture?.Dispose();
+                    _srvY?.Dispose();
+                    _srvUV?.Dispose();
+
                     _d3d11DecodeTexture = _d3d11Device.CreateTexture2D(new Texture2DDescription
                     {
                         Width = (uint)trueWidth,
@@ -351,36 +356,40 @@ namespace JonPlayer
                         BindFlags = BindFlags.ShaderResource,
                         SampleDescription = new SampleDescription(1, 0)
                     });
+
+                    var srvDescY = new ShaderResourceViewDescription
+                    {
+                        Format = DXGIFormat.R8_UNorm,
+                        ViewDimension = ShaderResourceViewDimension.Texture2D,
+                        Texture2D = new Texture2DShaderResourceView { MostDetailedMip = 0, MipLevels = 1 }
+                    };
+                    var srvDescUV = new ShaderResourceViewDescription
+                    {
+                        Format = DXGIFormat.R8G8_UNorm,
+                        ViewDimension = ShaderResourceViewDimension.Texture2D,
+                        Texture2D = new Texture2DShaderResourceView { MostDetailedMip = 0, MipLevels = 1 }
+                    };
+
+                    _srvY = _d3d11Device.CreateShaderResourceView(_d3d11DecodeTexture, srvDescY);
+                    _srvUV = _d3d11Device.CreateShaderResourceView(_d3d11DecodeTexture, srvDescUV);
+
+                    if (_shadersInitialized && _d3d11Context != null)
+                    {
+                        _d3d11Context.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleList);
+                        _d3d11Context.VSSetShader(_vertexShader);
+                        _d3d11Context.PSSetShader(_pixelShader);
+                        _d3d11Context.PSSetSampler(0, _samplerState);
+                    }
                 }
 
-                if (_renderTargetView == null || _d3d11Texture == null || _d3d11OffscreenTexture == null) return;
+                if (_renderTargetView == null || _d3d11Texture == null || _d3d11OffscreenTexture == null || _srvY == null || _srvUV == null) return;
 
                 var box = new Vortice.Mathematics.Box { Left = 0, Top = 0, Front = 0, Right = trueWidth, Bottom = trueHeight, Back = 1 };
                 _d3d11Context.CopySubresourceRegion(_d3d11DecodeTexture, 0, 0, 0, 0, hwTexture, (uint)sliceIndex, box);
 
-                var srvDescY = new ShaderResourceViewDescription
-                {
-                    Format = DXGIFormat.R8_UNorm,
-                    ViewDimension = ShaderResourceViewDimension.Texture2D,
-                    Texture2D = new Texture2DShaderResourceView { MostDetailedMip = 0, MipLevels = 1 }
-                };
-                var srvDescUV = new ShaderResourceViewDescription
-                {
-                    Format = DXGIFormat.R8G8_UNorm,
-                    ViewDimension = ShaderResourceViewDimension.Texture2D,
-                    Texture2D = new Texture2DShaderResourceView { MostDetailedMip = 0, MipLevels = 1 }
-                };
-
-                using var srvY = _d3d11Device.CreateShaderResourceView(_d3d11DecodeTexture, srvDescY);
-                using var srvUV = _d3d11Device.CreateShaderResourceView(_d3d11DecodeTexture, srvDescUV);
-
                 _d3d11Context.OMSetRenderTargets(_renderTargetView);
                 _d3d11Context.RSSetViewport(new Vortice.Mathematics.Viewport(0, 0, trueWidth, trueHeight));
-                _d3d11Context.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleList);
-                _d3d11Context.VSSetShader(_vertexShader);
-                _d3d11Context.PSSetShader(_pixelShader);
-                _d3d11Context.PSSetSampler(0, _samplerState);
-                _d3d11Context.PSSetShaderResources(0, new[] { srvY, srvUV });
+                _d3d11Context.PSSetShaderResources(0, new[] { _srvY, _srvUV });
                 _d3d11Context.Draw(3, 0);
 
                 // Atomic copy to the shared texture to prevent WPF tearing
@@ -395,20 +404,36 @@ namespace JonPlayer
 
         private void CleanupResources()
         {
-            var oldSurface = _d3d9Surface;
-            var oldTexture9 = _d3d9Texture;
-            var oldTexture11 = _d3d11Texture;
-            var oldDecodeTex = _d3d11DecodeTexture;
-            var oldOffscreenTex = _d3d11OffscreenTexture;
-            var oldRt = _renderTargetView;
+            IDirect3DSurface9? oldSurface;
+            IDirect3DTexture9? oldTexture9;
+            ID3D11Texture2D? oldTexture11;
+            ID3D11Texture2D? oldDecodeTex;
+            ID3D11Texture2D? oldOffscreenTex;
+            ID3D11RenderTargetView? oldRt;
+            ID3D11ShaderResourceView? oldSrvY;
+            ID3D11ShaderResourceView? oldSrvUV;
 
-            _d3d9Surface = null;
-            _d3d9Texture = null;
-            _d3d11Texture = null;
-            _d3d11DecodeTexture = null;
-            _d3d11OffscreenTexture = null;
-            _renderTargetView = null;
-            _sharedHandle = IntPtr.Zero;
+            lock (_renderLock)
+            {
+                oldSurface = _d3d9Surface;
+                oldTexture9 = _d3d9Texture;
+                oldTexture11 = _d3d11Texture;
+                oldDecodeTex = _d3d11DecodeTexture;
+                oldOffscreenTex = _d3d11OffscreenTexture;
+                oldRt = _renderTargetView;
+                oldSrvY = _srvY;
+                oldSrvUV = _srvUV;
+
+                _d3d9Surface = null;
+                _d3d9Texture = null;
+                _d3d11Texture = null;
+                _d3d11DecodeTexture = null;
+                _d3d11OffscreenTexture = null;
+                _renderTargetView = null;
+                _srvY = null;
+                _srvUV = null;
+                _sharedHandle = IntPtr.Zero;
+            }
 
             Action detachAndDispose = () =>
             {
@@ -428,6 +453,8 @@ namespace JonPlayer
                     oldTexture11?.Dispose();
                     oldDecodeTex?.Dispose();
                     oldOffscreenTex?.Dispose();
+                    oldSrvY?.Dispose();
+                    oldSrvUV?.Dispose();
                 }));
             };
 
@@ -451,10 +478,13 @@ namespace JonPlayer
                 }));
             }
             CleanupResources();
-            _d3d9Device?.Dispose(); _d3d9Device = null;
-            _d3d9Ex?.Dispose(); _d3d9Ex = null;
-            _d3d11Context?.Dispose(); _d3d11Context = null;
-            _d3d11Device?.Dispose(); _d3d11Device = null;
+            lock (_renderLock)
+            {
+                _d3d9Device?.Dispose(); _d3d9Device = null;
+                _d3d9Ex?.Dispose(); _d3d9Ex = null;
+                _d3d11Context?.Dispose(); _d3d11Context = null;
+                _d3d11Device?.Dispose(); _d3d11Device = null;
+            }
         }
     }
 }

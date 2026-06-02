@@ -224,7 +224,16 @@
                         <Grid Background="Transparent">
                             <Rectangle Fill="Transparent" Height="20"/>
                             <Border Height="4" CornerRadius="2" Background="{DynamicResource DividerBrush}" VerticalAlignment="Center"/>
-                            <Border Height="4" CornerRadius="2" Background="{DynamicResource AccentBrush}" VerticalAlignment="Center" HorizontalAlignment="Left">
+                            <Border Height="4" CornerRadius="2" VerticalAlignment="Center" HorizontalAlignment="Left">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                        <GradientStop Color="#00E5FF" Offset="0.0"/>
+                                        <GradientStop Color="#7B2CBF" Offset="1.0"/>
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <Border.Effect>
+                                    <DropShadowEffect Color="#00E5FF" BlurRadius="10" ShadowDepth="0" Opacity="0.8"/>
+                                </Border.Effect>
                                 <Border.Width>
                                     <MultiBinding Converter="{x:Static local:SliderFillConverter.Instance}">
                                         <Binding RelativeSource="{RelativeSource TemplatedParent}" Path="Value"/>
@@ -247,7 +256,11 @@
                                     <Thumb Focusable="False">
                                         <Thumb.Template>
                                             <ControlTemplate TargetType="Thumb">
-                                                <Ellipse Width="12" Height="12" Fill="{DynamicResource AccentBrush}" Stroke="{DynamicResource BgBrush}" StrokeThickness="2"/>
+                                                <Ellipse Width="12" Height="12" Fill="#FFFFFF" Stroke="#222222" StrokeThickness="1">
+                                                    <Ellipse.Effect>
+                                                        <DropShadowEffect Color="Black" BlurRadius="4" ShadowDepth="1" Opacity="0.8"/>
+                                                    </Ellipse.Effect>
+                                                </Ellipse>
                                             </ControlTemplate>
                                         </Thumb.Template>
                                     </Thumb>
@@ -331,7 +344,7 @@
                         <Grid>
                             <Rectangle Fill="Transparent" Height="45"/>
                             <Border Height="4" CornerRadius="2" Background="{DynamicResource DividerBrush}" VerticalAlignment="Center"/>
-                            <Border Height="4" CornerRadius="2" Background="{DynamicResource AccentBrush}" VerticalAlignment="Center" HorizontalAlignment="Left">
+                            <Border Height="4" CornerRadius="2" Background="#007AFF" VerticalAlignment="Center" HorizontalAlignment="Left">
                                 <Border.Width>
                                     <MultiBinding Converter="{x:Static local:SliderFillConverter.Instance}">
                                         <Binding RelativeSource="{RelativeSource TemplatedParent}" Path="Value"/>
@@ -354,7 +367,7 @@
                                     <Thumb Focusable="False">
                                         <Thumb.Template>
                                             <ControlTemplate TargetType="Thumb">
-                                                <Ellipse Width="10" Height="10" Fill="{DynamicResource AccentBrush}" Stroke="{DynamicResource BgBrush}" StrokeThickness="2"/>
+                                                <Ellipse Width="10" Height="10" Fill="#007AFF" Stroke="{DynamicResource BgBrush}" StrokeThickness="2"/>
                                             </ControlTemplate>
                                         </Thumb.Template>
                                     </Thumb>
@@ -429,49 +442,53 @@
             </Setter>
         </Style>
 
-        <Style x:Key="SpeedCapsule" TargetType="Button">
-            <Setter Property="Background"      Value="Transparent"/>
-            <Setter Property="Foreground"      Value="{DynamicResource TextBrush}"/>
-            <Setter Property="FontFamily"      Value="Impact"/>
-            <Setter Property="FontSize"        Value="13"/>
-            <Setter Property="Width"           Value="64"/>
-            <Setter Property="Height"          Value="28"/>
-            <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Cursor"          Value="Hand"/>
-            <Setter Property="Focusable"       Value="False"/>
+        <Style x:Key="SpeedTextButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="FontSize"   Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor"     Value="Hand"/>
+            <Setter Property="Focusable"  Value="False"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Grid>
-                            <Border x:Name="OuterBorder" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="1" CornerRadius="14"/>
-                            <Border x:Name="InnerFill" Background="{DynamicResource KnobBgBrush}" CornerRadius="13" Margin="1"/>
-                            <Border CornerRadius="13" Margin="1" IsHitTestVisible="False">
-                                <Border.Background>
-                                    <RadialGradientBrush Center="0.35,0.3" RadiusX="0.7" RadiusY="0.7">
-                                        <GradientStop Color="#22FFFFFF" Offset="0"/>
-                                        <GradientStop Color="Transparent" Offset="1"/>
-                                    </RadialGradientBrush>
-                                </Border.Background>
-                            </Border>
-                            <ContentPresenter x:Name="cp" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                <ContentPresenter.Resources>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Effect">
-                                            <Setter.Value>
-                                                <DropShadowEffect BlurRadius="1" ShadowDepth="1" Color="Black" Direction="270" Opacity="0.4"/>
-                                            </Setter.Value>
-                                        </Setter>
-                                    </Style>
-                                </ContentPresenter.Resources>
-                            </ContentPresenter>
-                        </Grid>
+                        <Border Background="Transparent" Padding="4,2">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="OuterBorder" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                <Setter Property="Foreground" Value="#1DB954"/>
                             </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="InnerFill" Property="Margin" Value="2"/>
-                                <Setter TargetName="cp" Property="Margin" Value="1,1,0,0"/>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="TextToggleButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
+            <Setter Property="FontSize"   Value="11"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Cursor"     Value="Hand"/>
+            <Setter Property="Focusable"  Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="Transparent" Padding="4,2">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                            </Trigger>
+                            <Trigger Property="Tag" Value="On">
+                                <Setter Property="Foreground" Value="#00E5FF"/>
+                                <Setter Property="Effect">
+                                    <Setter.Value>
+                                        <DropShadowEffect Color="#00E5FF" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                    </Setter.Value>
+                                </Setter>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -555,11 +572,14 @@
         </Border>
 
         <Grid x:Name="VideoGrid" Grid.Row="1" Background="Black">
-            <Image x:Name="VideoElement" Stretch="Uniform" Visibility="Collapsed">
-                <Image.LayoutTransform>
-                    <RotateTransform x:Name="VideoRotation" Angle="0"/>
-                </Image.LayoutTransform>
-            </Image>
+            <!-- Viewbox corrects aspect ratio when video is rotated 90°/270° -->
+            <Viewbox x:Name="VideoViewbox" Stretch="Uniform" Visibility="Collapsed">
+                <Image x:Name="VideoElement" Stretch="Uniform">
+                    <Image.LayoutTransform>
+                        <RotateTransform x:Name="VideoRotation" Angle="0"/>
+                    </Image.LayoutTransform>
+                </Image>
+            </Viewbox>
             <Image x:Name="ImgSplash" Stretch="None" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
 
             <Grid x:Name="AudioUI" Visibility="Collapsed">
@@ -569,6 +589,7 @@
                     </Image.Effect>
                 </Image>
                 <Rectangle Fill="#88000000"/> 
+                <Canvas x:Name="AudioNotesCanvas" IsHitTestVisible="False"/>
                 <Grid VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,60">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -601,6 +622,14 @@
 
             <Border x:Name="OverlayStats" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="10" Background="#CC000000" CornerRadius="5" IsHitTestVisible="False" Visibility="Collapsed" Panel.ZIndex="100">
                 <TextBlock x:Name="TxtOverlayStats" Foreground="#00FF00" FontFamily="Consolas" FontSize="12" LineHeight="18" Text="Stats..." />
+            </Border>
+
+            <!-- Toast UI for Notifications -->
+            <Border x:Name="ToastOverlay" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,50,0,0" Padding="16,10" Background="#CC111111" CornerRadius="8" IsHitTestVisible="False" Visibility="Collapsed" Panel.ZIndex="150" BorderBrush="#55FFFFFF" BorderThickness="1">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="10" ShadowDepth="4" Opacity="0.5"/>
+                </Border.Effect>
+                <TextBlock x:Name="TxtToast" Foreground="White" FontSize="14" FontWeight="SemiBold" Text="Notification"/>
             </Border>
 
             <!-- Fullscreen Close Button -->
@@ -639,7 +668,7 @@
             <!-- Glassmorphism Playlist Popup (draggable) -->
             <Border x:Name="PlaylistOverlay"
                     HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                    Margin="10,10,10,100"
+                    Margin="10,10,10,200"
                     Width="300" MaxHeight="420"
                     Visibility="Collapsed"
                     Panel.ZIndex="100"
@@ -829,6 +858,202 @@
                 </Border>
             </Border>
 
+            <!-- Glassmorphism Shortcuts Overlay (draggable) -->
+            <Border x:Name="ShortcutsOverlay"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Width="630" Height="630"
+                    Visibility="Collapsed"
+                    Panel.ZIndex="100"
+                    RenderTransformOrigin="0.5,0.5">
+                <Border.RenderTransform>
+                    <TranslateTransform x:Name="ShortcutsTranslate" X="0" Y="0"/>
+                </Border.RenderTransform>
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="24" ShadowDepth="6" Direction="270" Color="#000000" Opacity="0.55"/>
+                </Border.Effect>
+                <!-- Outer glass border -->
+                <Border CornerRadius="14"
+                        BorderBrush="{DynamicResource PlaylistBorderBrush}"
+                        BorderThickness="1"
+                        ClipToBounds="True">
+                    <Border.Background>
+                        <SolidColorBrush Color="Transparent" />
+                    </Border.Background>
+                    <Grid Background="{DynamicResource PlaylistBgBrush}">
+                        <!-- Subtle top gloss highlight -->
+                        <Border CornerRadius="14,14,0,0" Height="50" VerticalAlignment="Top" IsHitTestVisible="False">
+                            <Border.Background>
+                                <SolidColorBrush Color="Transparent" />
+                            </Border.Background>
+                            <Border Background="{DynamicResource PlaylistTopGlossBrush}"/>
+                        </Border>
+
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Drag handle / title bar -->
+                            <Border Grid.Row="0" CornerRadius="14,14,0,0"
+                                    Cursor="SizeAll"
+                                    MouseLeftButtonDown="ShortcutsOverlay_DragStart"
+                                    MouseMove="ShortcutsOverlay_DragMove"
+                                    MouseLeftButtonUp="ShortcutsOverlay_DragEnd"
+                                    Padding="12,10,10,8">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                        <GradientStop Color="#221DB954" Offset="0"/>
+                                        <GradientStop Color="#00000000" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <Grid>
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <!-- Drag grip dots -->
+                                        <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,8,0" IsHitTestVisible="False">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,2"/>
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,2"/>
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,0"/>
+                                                <Ellipse Width="3" Height="3" Fill="{DynamicResource TextMutedBrush}" Margin="0,0,2,0"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <TextBlock Text="Keyboard Shortcuts" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" FontSize="13" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                        <Button Width="26" Height="26" ToolTip="Close Shortcuts" Click="BtnShortcutsClose_Click" Cursor="Hand" Focusable="False"
+                                                Background="#28FFFFFF" BorderThickness="0">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="13">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="bd" Property="Background" Value="#44FF4444"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                            <TextBlock Text="✕" Foreground="#AAAAAA" FontSize="11" VerticalAlignment="Center"/>
+                                        </Button>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- Thin divider -->
+                            <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom" IsHitTestVisible="False">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                        <GradientStop Color="#00FFFFFF" Offset="0"/>
+                                        <GradientStop Color="#30FFFFFF" Offset="0.5"/>
+                                        <GradientStop Color="#00FFFFFF" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                            </Border>
+
+                            <!-- Shortcuts List -->
+                            <ScrollViewer Grid.Row="1" Margin="10,10,10,10" VerticalScrollBarVisibility="Auto">
+                                <ScrollViewer.Resources>
+                                    <Style TargetType="ScrollBar" BasedOn="{StaticResource ThinScrollBarStyle}"/>
+                                </ScrollViewer.Resources>
+                                <StackPanel Orientation="Vertical">
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F1" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="단축키 안내 보기/숨기기 (Show / Hide Shortcuts)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Space" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="재생 / 일시정지 (Play / Pause)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F11" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="Enter" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="전체화면 전환 (Toggle Fullscreen)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Esc" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="전체화면 종료 (Exit Fullscreen)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Z" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="창에 맞추기 (Toggle Stretch Mode)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="비디오에 창 크기 맞춤 (Fit to Video)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="`" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="1" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="2" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="창 크기 50% / 100% / 200% (Window Size 50/100/200%)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="&lt;" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="&gt;" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="재생 속도 감소 / 증가 (Speed Down / Up)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="←" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="→" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="5초 탐색 (Ctrl: 30s Jump)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="↑" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="↓" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="볼륨 조절 / 플레이리스트 이동 (Volume / Playlist Nav)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="M" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="음소거 설정/해제 (Toggle Mute)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F9" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="Ctrl+L" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="플레이리스트 토글 (Toggle Playlist)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F3" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="통계 표시 (Toggle Stats)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+O" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="파일 열기 (Open File)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+Shift+O" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="폴더 열기 (Open Folder)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="C" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="화면 캡처 (Screenshot to Downloads)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+W" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="파일 닫기 (Close File)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Border>
+
             <Button x:Name="NextVideoOverlay" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,20,90" Background="#CC000000" Visibility="Collapsed" Panel.ZIndex="100" BorderBrush="#33FFFFFF" BorderThickness="1" Padding="10" Cursor="Hand" Click="NextVideoOverlay_Click">
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
@@ -880,18 +1105,20 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock x:Name="TxtCurrentTimeFS" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <Slider x:Name="SliderTimelineFS" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsMoveToPointEnabled="True" Thumb.DragStarted="SliderTimeline_DragStarted" Thumb.DragCompleted="SliderTimeline_DragCompleted" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="TxtTotalTimeFS" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                        <TextBlock x:Name="TxtCurrentTimeFS" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="13" FontWeight="SemiBold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <Slider x:Name="SliderTimelineFS" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsEnabled="False" IsMoveToPointEnabled="True" Thumb.DragStarted="SliderTimeline_DragStarted" Thumb.DragCompleted="SliderTimeline_DragCompleted" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TxtTotalTimeFS" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="13" FontWeight="SemiBold" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </Grid>
                     <Grid>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
                             <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
                                 <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Button x:Name="BtnPlaylistToggleFS" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False">
+                            <Button x:Name="BtnPlaylistToggleFS" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False" Margin="0,0,8,0">
                                 <Path Data="{StaticResource PlaylistIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="16" Height="16" Stretch="Uniform"/>
                             </Button>
+                            <Button x:Name="BtnRepeatFS" Style="{StaticResource TextToggleButton}" Content="REPEAT" Click="BtnRepeat_Click" Margin="0,0,8,0" ToolTip="Repeat Playlist"/>
+                            <Button x:Name="BtnShuffleFS" Style="{StaticResource TextToggleButton}" Content="SHUFFLE" Click="BtnShuffle_Click" Margin="0,0,8,0" ToolTip="Shuffle Playlist"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
@@ -918,7 +1145,7 @@
                                 <Path x:Name="MuteIconPathFS" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
                             <Slider x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                            <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedCapsule}" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,8,0">
+                            <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,12,0">
                                 <Button.ContextMenu>
                                     <ContextMenu x:Name="MenuSpeedFS">
                                         <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
@@ -951,9 +1178,9 @@
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock x:Name="TxtCurrentTime" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" FontFamily="Consolas" VerticalAlignment="Center" Margin="14,0,8,0"/>
-                <Slider x:Name="SliderTimeline" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsMoveToPointEnabled="True" Thumb.DragStarted="SliderTimeline_DragStarted" Thumb.DragCompleted="SliderTimeline_DragCompleted" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
-                <TextBlock x:Name="TxtTotalTime" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,14,0"/>
+                <TextBlock x:Name="TxtCurrentTime" Grid.Column="0" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="13" FontWeight="SemiBold" FontFamily="Consolas" VerticalAlignment="Center" Margin="14,0,8,0"/>
+                <Slider x:Name="SliderTimeline" Grid.Column="1" Style="{StaticResource TimelineSlider}" Minimum="0" Maximum="1000" Value="0" IsEnabled="False" IsMoveToPointEnabled="True" Thumb.DragStarted="SliderTimeline_DragStarted" Thumb.DragCompleted="SliderTimeline_DragCompleted" ValueChanged="SliderTimeline_ValueChanged" VerticalAlignment="Center"/>
+                <TextBlock x:Name="TxtTotalTime" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="13" FontWeight="SemiBold" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,14,0"/>
             </Grid>
         </Border>
 
@@ -963,9 +1190,11 @@
                     <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
                         <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
-                    <Button x:Name="BtnPlaylistToggle" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False">
+                    <Button x:Name="BtnPlaylistToggle" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False" Margin="0,0,8,0">
                         <Path Data="{StaticResource PlaylistIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="16" Height="16" Stretch="Uniform"/>
                     </Button>
+                    <Button x:Name="BtnRepeat" Style="{StaticResource TextToggleButton}" Content="REPEAT" Click="BtnRepeat_Click" Margin="0,0,8,0" ToolTip="Repeat Playlist"/>
+                    <Button x:Name="BtnShuffle" Style="{StaticResource TextToggleButton}" Content="SHUFFLE" Click="BtnShuffle_Click" Margin="0,0,8,0" ToolTip="Shuffle Playlist"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
@@ -994,7 +1223,7 @@
                     <Slider x:Name="SliderVolume" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,14,0"/>
                     <Border Width="1" Height="20" Background="{DynamicResource DividerBrush}" Margin="0,0,14,0"/>
                     <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <Button x:Name="BtnSpeed" Style="{StaticResource SpeedCapsule}" Content="1.0x ▾" ToolTip="Playback Speed" Click="BtnSpeed_Click" Margin="0,0,12,0">
+                    <Button x:Name="BtnSpeed" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Playback Speed" Click="BtnSpeed_Click" Margin="0,0,12,0">
                         <Button.ContextMenu>
                             <ContextMenu x:Name="MenuSpeed">
                                 <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>

@@ -16,6 +16,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media.Imaging;
 using NAudio.Wave;
 using System.Diagnostics;
+using System.Windows.Media.Animation;
 
 // ── Resolve WPF vs WinForms ambiguities ──────────────────
 using Size           = System.Windows.Size;
@@ -104,6 +105,7 @@ namespace JonPlayer
 
         private DispatcherTimer _fsMousePollTimer;
         private DispatcherTimer _statsTimer;
+        private DispatcherTimer _toastTimer;
 
         // Stats Overlay
         private int _openCount = 0;
@@ -131,6 +133,9 @@ namespace JonPlayer
 
         private DispatcherTimer _cursorHideTimer;
         private DispatcherTimer _fsVolumeTimer;
+        private DispatcherTimer _notesTimer;
+        private Random _notesRandom = new Random();
+        private string[] _musicNotes = { "♩", "♪", "♫", "♬", "♭", "♮", "♯" };
 
         private readonly string[] _idleVibes = new string[]
         {
@@ -167,6 +172,9 @@ namespace JonPlayer
 
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += StatsTimer_Tick;
+
+            _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _toastTimer.Tick += (s, e) => { ToastOverlay.Visibility = Visibility.Collapsed; _toastTimer.Stop(); };
             
             _cursorHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _cursorHideTimer.Tick += (s, e) =>
@@ -181,6 +189,9 @@ namespace JonPlayer
                 OverlayFsVolume.Visibility = Visibility.Collapsed;
                 _fsVolumeTimer.Stop();
             };
+
+            _notesTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
+            _notesTimer.Tick += NotesTimer_Tick;
 
             _lastCpuTime = Process.GetCurrentProcess().TotalProcessorTime;
             _lastCpuCheckTime = DateTime.UtcNow;
@@ -208,9 +219,15 @@ namespace JonPlayer
             _renderSamples++;
         }
 
+        private DateTime _lastSliderUpdate = DateTime.MinValue;
+
         private void Decoder_PositionChanged(double ratio)
         {
             if (_isUserDraggingSlider || _isSeeking) return;
+
+            var now = DateTime.UtcNow;
+            if ((now - _lastSliderUpdate).TotalMilliseconds < 33) return;
+            _lastSliderUpdate = now;
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
@@ -222,23 +239,52 @@ namespace JonPlayer
             }));
         }
 
+        private DateTime _lastTimeUpdate = DateTime.MinValue;
+
         private void Decoder_TimeUpdated(TimeSpan current, TimeSpan total)
         {
+            var now = DateTime.UtcNow;
+            if ((now - _lastTimeUpdate).TotalMilliseconds < 200) return;
+            _lastTimeUpdate = now;
+
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (_isSeeking || _decoder == null || !_decoder.IsRunning) return;
                 TxtCurrentTime.Text = current.ToString(@"hh\:mm\:ss");
-                TxtTotalTime.Text = total.ToString(@"hh\:mm\:ss");
+                
+                var remaining = total - current;
+                if (remaining.TotalSeconds < 0) remaining = TimeSpan.Zero;
+                TxtTotalTime.Text = "-" + remaining.ToString(@"hh\:mm\:ss");
+                
                 if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = TxtCurrentTime.Text;
                 if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = TxtTotalTime.Text;
 
                 // Handle Next Video Overlay
-                if (_playlist.Count > 1 && _playlistIndex >= 0 && _playlistIndex < _playlist.Count - 1)
+                if (!_isShuffle && _playlist.Count > 1 && _playlistIndex >= 0)
                 {
-                    if (total.TotalSeconds > 0 && total - current <= TimeSpan.FromSeconds(5))
+                    if (_playlistIndex < _playlist.Count - 1)
                     {
-                        TxtNextVideoName.Text = _playlist[_playlistIndex + 1].Name;
-                        NextVideoOverlay.Visibility = Visibility.Visible;
+                        if (total.TotalSeconds > 0 && total - current <= TimeSpan.FromSeconds(5))
+                        {
+                            TxtNextVideoName.Text = _playlist[_playlistIndex + 1].Name;
+                            NextVideoOverlay.Visibility = Visibility.Visible;
+                        }
+                        else
+                        {
+                            NextVideoOverlay.Visibility = Visibility.Collapsed;
+                        }
+                    }
+                    else if (_isRepeat && _playlistIndex == _playlist.Count - 1)
+                    {
+                        if (total.TotalSeconds > 0 && total - current <= TimeSpan.FromSeconds(5))
+                        {
+                            TxtNextVideoName.Text = _playlist[0].Name;
+                            NextVideoOverlay.Visibility = Visibility.Visible;
+                        }
+                        else
+                        {
+                            NextVideoOverlay.Visibility = Visibility.Collapsed;
+                        }
                     }
                     else
                     {
@@ -247,7 +293,7 @@ namespace JonPlayer
                 }
                 else
                 {
-                    NextVideoOverlay.Visibility = Visibility.Collapsed;
+                    if (NextVideoOverlay != null) NextVideoOverlay.Visibility = Visibility.Collapsed;
                 }
             }));
         }
@@ -503,6 +549,11 @@ namespace JonPlayer
         private double _playlistDragOriginX;
         private double _playlistDragOriginY;
 
+        private bool   _isShortcutsDragging;
+        private Point  _shortcutsDragStart;
+        private double _shortcutsDragOriginX;
+        private double _shortcutsDragOriginY;
+
         private System.Collections.ObjectModel.ObservableCollection<PlaylistItem> _playlist = new System.Collections.ObjectModel.ObservableCollection<PlaylistItem>();
         private int _playlistIndex = -1;
 
@@ -568,6 +619,7 @@ namespace JonPlayer
         private void LoadPlaylist(string[] files)
         {
             _playlist.Clear();
+            _playedIndices.Clear();
             foreach (var f in files) 
             {
                 _playlist.Add(new PlaylistItem { Name = System.IO.Path.GetFileName(f), Path = f });
@@ -598,6 +650,7 @@ namespace JonPlayer
             if (ListPlaylist.SelectedItem is PlaylistItem item)
             {
                 _playlistIndex = _playlist.IndexOf(item);
+                _playedIndices.Clear();
                 PlayFile(item.Path);
                 UpdateNowPlayingHighlight();
             }
@@ -712,6 +765,44 @@ namespace JonPlayer
         private void BtnPlaylistClose_Click(object sender, RoutedEventArgs e)
         {
             PlaylistOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        private void BtnShortcutsClose_Click(object sender, RoutedEventArgs e)
+        {
+            ShortcutsOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        // ── Shortcuts drag-to-move ──────────────────────────────────────────
+        private void ShortcutsOverlay_DragStart(object sender, MouseButtonEventArgs e)
+        {
+            _isShortcutsDragging = true;
+            _shortcutsDragStart  = e.GetPosition(VideoGrid);
+            var tx = ShortcutsTranslate;
+            _shortcutsDragOriginX = tx.X;
+            _shortcutsDragOriginY = tx.Y;
+            (sender as UIElement)?.CaptureMouse();
+            e.Handled = true;
+        }
+
+        private void ShortcutsOverlay_DragMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (!_isShortcutsDragging) return;
+            var current = e.GetPosition(VideoGrid);
+            var tx = ShortcutsTranslate;
+
+            double newX = _shortcutsDragOriginX + (current.X - _shortcutsDragStart.X);
+            double newY = _shortcutsDragOriginY + (current.Y - _shortcutsDragStart.Y);
+            
+            tx.X = newX;
+            tx.Y = newY;
+        }
+
+        private void ShortcutsOverlay_DragEnd(object sender, MouseButtonEventArgs e)
+        {
+            if (!_isShortcutsDragging) return;
+            _isShortcutsDragging = false;
+            (sender as UIElement)?.ReleaseMouseCapture();
+            e.Handled = true;
         }
 
         // ── Playlist drag-to-move ──────────────────────────────────────────
@@ -846,14 +937,86 @@ namespace JonPlayer
 
         private bool _isOpeningFile = false;
 
-        private void PlayNext()
+        private void PlayPrev()
         {
-            if (_playlist.Count > 0 && _playlistIndex < _playlist.Count - 1)
+            if (_isOpeningFile) return;
+            if (_playlist.Count > 0)
             {
-                _playlistIndex++;
-                PlayFile(_playlist[_playlistIndex].Path);
-                UpdateNowPlayingHighlight();
+                if (_isShuffle)
+                {
+                    if (_playlist.Count > 1)
+                    {
+                        int nextIndex;
+                        do {
+                            nextIndex = Random.Shared.Next(_playlist.Count);
+                        } while (nextIndex == _playlistIndex);
+                        _playlistIndex = nextIndex;
+                    }
+                    PlayFile(_playlist[_playlistIndex].Path);
+                    UpdateNowPlayingHighlight();
+                }
+                else if (_playlistIndex > 0)
+                {
+                    _playlistIndex--;
+                    PlayFile(_playlist[_playlistIndex].Path);
+                    UpdateNowPlayingHighlight();
+                }
+                else if (_isRepeat)
+                {
+                    _playlistIndex = _playlist.Count - 1;
+                    PlayFile(_playlist[_playlistIndex].Path);
+                    UpdateNowPlayingHighlight();
+                }
             }
+        }
+
+        private void BtnPrev_Click(object sender, RoutedEventArgs e) => PlayPrev();
+        private void BtnNext_Click(object sender, RoutedEventArgs e) => PlayNext();
+
+        private bool PlayNext()
+        {
+            if (_isOpeningFile) return false;
+            if (_playlist.Count > 0)
+            {
+                if (_isShuffle)
+                {
+                    _playedIndices.Add(_playlistIndex);
+
+                    if (_playedIndices.Count >= _playlist.Count)
+                    {
+                        if (!_isRepeat) return false;
+                        _playedIndices.Clear();
+                        _playedIndices.Add(_playlistIndex);
+                    }
+
+                    if (_playlist.Count > 1)
+                    {
+                        int nextIndex;
+                        do {
+                            nextIndex = Random.Shared.Next(_playlist.Count);
+                        } while (nextIndex == _playlistIndex || _playedIndices.Contains(nextIndex));
+                        _playlistIndex = nextIndex;
+                    }
+                    PlayFile(_playlist[_playlistIndex].Path);
+                    UpdateNowPlayingHighlight();
+                    return true;
+                }
+                else if (_playlistIndex < _playlist.Count - 1)
+                {
+                    _playlistIndex++;
+                    PlayFile(_playlist[_playlistIndex].Path);
+                    UpdateNowPlayingHighlight();
+                    return true;
+                }
+                else if (_isRepeat)
+                {
+                    _playlistIndex = 0;
+                    PlayFile(_playlist[_playlistIndex].Path);
+                    UpdateNowPlayingHighlight();
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void Decoder_PlaybackFinished()
@@ -861,19 +1024,25 @@ namespace JonPlayer
             Dispatcher.Invoke(() =>
             {
                 UpdatePlayPauseUI(false);
-                if (_playlist.Count > 0 && _playlistIndex < _playlist.Count - 1)
+                if (!PlayNext())
                 {
-                    PlayNext();
-                }
-                else
-                {
-                    if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
+                    if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
                     
                     _isUpdatingFromPlayer = true;
-                    if (SliderTimeline != null) SliderTimeline.Value = 0;
-                    if (SliderTimelineFS != null) SliderTimelineFS.Value = 0;
+                    if (SliderTimeline != null) 
+                    {
+                        SliderTimeline.Value = 0;
+                        SliderTimeline.IsEnabled = false;
+                        SliderTimeline.IsHitTestVisible = false;
+                    }
+                    if (SliderTimelineFS != null) 
+                    {
+                        SliderTimelineFS.Value = 0;
+                        SliderTimelineFS.IsEnabled = false;
+                        SliderTimelineFS.IsHitTestVisible = false;
+                    }
                     _isUpdatingFromPlayer = false;
                     
                     if (TxtCurrentTime != null) TxtCurrentTime.Text = "00:00:00";
@@ -882,11 +1051,19 @@ namespace JonPlayer
                     if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = "00:00:00";
                     
                     SetRandomVibe();
+                    Title = "JonPlayer";
+
+                    if (_decoder != null)
+                    {
+                        var oldDec = _decoder;
+                        _decoder = null;
+                        Task.Run(() => { oldDec.Stop(); oldDec.Dispose(); });
+                    }
                 }
             });
         }
 
-        private async void PlayFile(string path)
+        private async void PlayFile(string path, double startRatio = 0.0)
         {
             if (_isOpeningFile) return;
             _isOpeningFile = true;
@@ -910,6 +1087,7 @@ namespace JonPlayer
                 
                 if (oldDecoder != null)
                 {
+                    oldDecoder.PlaybackFinished -= Decoder_PlaybackFinished;
                     await Task.Run(() => 
                     {
                         oldDecoder.Stop();
@@ -945,8 +1123,35 @@ namespace JonPlayer
                 _decoder = newDecoder;
                 InitAudioPlayer();
                 
+                Dispatcher.Invoke(() => {
+                    if (VideoElement != null && _decoder != null)
+                    {
+                        VideoElement.Width = _decoder.Width > 0 ? _decoder.Width : 1920;
+                        VideoElement.Height = _decoder.Height > 0 ? _decoder.Height : 1080;
+                    }
+                });
+                
                 _decoder.Play();
                 _waveOut?.Play();
+                
+                if (startRatio > 0.0)
+                {
+                    _decoder.Seek(startRatio);
+                }
+
+                Dispatcher.Invoke(() => {
+                    _isSeeking = false;
+                    if (SliderTimeline != null) 
+                    {
+                        SliderTimeline.IsEnabled = true;
+                        SliderTimeline.IsHitTestVisible = true;
+                    }
+                    if (SliderTimelineFS != null) 
+                    {
+                        SliderTimelineFS.IsEnabled = true;
+                        SliderTimelineFS.IsHitTestVisible = true;
+                    }
+                });
 
                 var name = Path.GetFileName(path);
                 TxtNowPlaying.Text = name;
@@ -961,13 +1166,13 @@ namespace JonPlayer
 
                 if (_decoder.HasVideo)
                 {
-                    if (VideoElement != null) VideoElement.Visibility = Visibility.Visible;
+                    if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Visible;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
                 }
                 else
                 {
-                    if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
+                    if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Visible;
 
@@ -997,8 +1202,9 @@ namespace JonPlayer
                         }
                         else
                         {
-                            AudioCoverBackground.Source = null;
-                            AudioCoverForeground.Source = null;
+                            var fallback = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/Assets/logo.png"));
+                            AudioCoverBackground.Source = fallback;
+                            AudioCoverForeground.Source = fallback;
                         }
                     }
                     catch
@@ -1006,8 +1212,9 @@ namespace JonPlayer
                         TxtAudioTitle.Text = name;
                         TxtAudioArtist.Text = "Unknown Artist";
                         TxtAudioAlbum.Text = "Unknown Album";
-                        AudioCoverBackground.Source = null;
-                        AudioCoverForeground.Source = null;
+                        var fallback = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/Assets/logo.png"));
+                        AudioCoverBackground.Source = fallback;
+                        AudioCoverForeground.Source = fallback;
                     }
                 }
 
@@ -1024,20 +1231,31 @@ namespace JonPlayer
         }
 
         private void BtnPlayPause_Click   (object sender, RoutedEventArgs e) => TogglePlayPause();
-        private void BtnStop_Click        (object sender, RoutedEventArgs e)
+        private async void BtnStop_Click        (object sender, RoutedEventArgs e)
         {
-            _decoder?.Stop();
+            var oldDecoder = _decoder;
+            _decoder = null;
+            if (oldDecoder != null)
+            {
+                oldDecoder.PlaybackFinished -= Decoder_PlaybackFinished;
+                await Task.Run(() => 
+                {
+                    oldDecoder.Stop();
+                    oldDecoder.Dispose();
+                });
+            }
+            
             _waveOut?.Stop();
             // _waveProvider?.ClearBuffer(); // Cleared in SeekPerformed, and provider is destroyed on next PlayFile
             UpdatePlayPauseUI(false);
-            if (VideoElement != null) VideoElement.Visibility = Visibility.Collapsed;
+            if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
             if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
             if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
             _isUpdatingFromPlayer = true;
-            SliderTimeline.Value = 0;
+            if (SliderTimeline != null) SliderTimeline.Value = 0;
             if (SliderTimelineFS != null) SliderTimelineFS.Value = 0;
             _isUpdatingFromPlayer = false;
-            TxtCurrentTime.Text = "00:00:00";
+            if (TxtCurrentTime != null) TxtCurrentTime.Text = "00:00:00";
             if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = "00:00:00";
             SetRandomVibe();
             Title = "JonPlayer";
@@ -1047,24 +1265,23 @@ namespace JonPlayer
         
         private void SeekForward(double offsetSeconds) => SeekRelative(offsetSeconds);
 
-        private void PlayPrev()
+        private bool _isRepeat = false;
+        private bool _isShuffle = false;
+        private HashSet<int> _playedIndices = new HashSet<int>();
+
+        private void BtnRepeat_Click(object sender, RoutedEventArgs e)
         {
-            if (_playlist.Count > 0 && _playlistIndex > 0)
-            {
-                _playlistIndex--;
-                PlayFile(_playlist[_playlistIndex].Path);
-                UpdateNowPlayingHighlight();
-            }
+            _isRepeat = !_isRepeat;
+            if (BtnRepeat != null) BtnRepeat.Tag = _isRepeat ? "On" : "";
+            if (BtnRepeatFS != null) BtnRepeatFS.Tag = _isRepeat ? "On" : "";
         }
 
-        private void BtnPrev_Click(object sender, RoutedEventArgs e)
+        private void BtnShuffle_Click(object sender, RoutedEventArgs e)
         {
-            PlayPrev();
-        }
-
-        private void BtnNext_Click(object sender, RoutedEventArgs e)
-        {
-            PlayNext();
+            _isShuffle = !_isShuffle;
+            if (BtnShuffle != null) BtnShuffle.Tag = _isShuffle ? "On" : "";
+            if (BtnShuffleFS != null) BtnShuffleFS.Tag = _isShuffle ? "On" : "";
+            if (_isShuffle) _playedIndices.Clear();
         }
 
         private void InitAudioPlayer()
@@ -1107,7 +1324,14 @@ namespace JonPlayer
             if (_decoder == null || _decoder.IsFinished || !_decoder.IsRunning)
             {
                 if (!string.IsNullOrEmpty(_currentFilePath))
-                    PlayFile(_currentFilePath);
+                {
+                    double ratio = 0.0;
+                    if (SliderTimeline != null && SliderTimeline.Maximum > 0)
+                    {
+                        ratio = SliderTimeline.Value / SliderTimeline.Maximum;
+                    }
+                    PlayFile(_currentFilePath, ratio);
+                }
                 return;
             }
 
@@ -1127,6 +1351,16 @@ namespace JonPlayer
 
         private void UpdatePlayPauseUI(bool isPlaying)
         {
+            if (isPlaying && AudioUI != null && AudioUI.Visibility == Visibility.Visible)
+            {
+                if (!_notesTimer.IsEnabled) _notesTimer.Start();
+            }
+            else
+            {
+                if (_notesTimer.IsEnabled) _notesTimer.Stop();
+                FadeOutAllNotes();
+            }
+
             var geom = (Geometry)FindResource(isPlaying ? "PauseIcon" : "PlayIcon");
             if (PlayPauseIconPath != null)
             {
@@ -1143,27 +1377,93 @@ namespace JonPlayer
             if (BtnPlayPauseFS != null) BtnPlayPauseFS.ToolTip = isPlaying ? "Pause" : "Play";
         }
 
+        private void NotesTimer_Tick(object? sender, EventArgs e)
+        {
+            if (AudioNotesCanvas == null || (AudioNotesCanvas.Visibility != Visibility.Visible && AudioUI.Visibility != Visibility.Visible)) return;
+            if (_decoder == null || !_decoder.IsPlaying) return;
+
+            var note = new TextBlock
+            {
+                Text = _musicNotes[_notesRandom.Next(_musicNotes.Length)],
+                Foreground = new SolidColorBrush(Color.FromArgb((byte)_notesRandom.Next(100, 200), (byte)_notesRandom.Next(200, 255), (byte)_notesRandom.Next(200, 255), 255)),
+                FontSize = _notesRandom.Next(24, 48),
+                RenderTransformOrigin = new Point(0.5, 0.5),
+                Opacity = 0
+            };
+
+            var transform = new TransformGroup();
+            var translate = new TranslateTransform();
+            var rotate = new RotateTransform();
+            transform.Children.Add(translate);
+            transform.Children.Add(rotate);
+            note.RenderTransform = transform;
+
+            AudioNotesCanvas.Children.Add(note);
+
+            double startX = AudioUI.ActualWidth / 2 + _notesRandom.Next(-300, 300);
+            double startY = AudioUI.ActualHeight / 2 + 100 + _notesRandom.Next(-50, 50);
+
+            Canvas.SetLeft(note, startX);
+            Canvas.SetTop(note, startY);
+
+            var duration = TimeSpan.FromSeconds(_notesRandom.Next(4, 7));
+
+            var opacityAnim = new DoubleAnimationUsingKeyFrames();
+            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(0)));
+            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0.8, KeyTime.FromPercent(0.2)));
+            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0.8, KeyTime.FromPercent(0.6)));
+            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(1.0)));
+            opacityAnim.Duration = duration;
+
+            var moveUpAnim = new DoubleAnimation(startY, startY - _notesRandom.Next(150, 300), new Duration(duration));
+            var swayAnim = new DoubleAnimation(-20, 20, new Duration(TimeSpan.FromSeconds(1.5))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever };
+            var rotateAnim = new DoubleAnimation(-15, 15, new Duration(TimeSpan.FromSeconds(2))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever };
+
+            note.BeginAnimation(UIElement.OpacityProperty, opacityAnim);
+            note.BeginAnimation(Canvas.TopProperty, moveUpAnim);
+            translate.BeginAnimation(TranslateTransform.XProperty, swayAnim);
+            rotate.BeginAnimation(RotateTransform.AngleProperty, rotateAnim);
+
+            var removeTimer = new DispatcherTimer { Interval = duration };
+            removeTimer.Tick += (s, ev) =>
+            {
+                removeTimer.Stop();
+                AudioNotesCanvas.Children.Remove(note);
+            };
+            removeTimer.Start();
+        }
+
+        private void FadeOutAllNotes()
+        {
+            if (AudioNotesCanvas == null) return;
+            foreach (UIElement child in AudioNotesCanvas.Children)
+            {
+                var currentOpacity = child.Opacity;
+                var fadeOut = new DoubleAnimation(currentOpacity, 0, new Duration(TimeSpan.FromSeconds(1)));
+                child.BeginAnimation(UIElement.OpacityProperty, fadeOut);
+            }
+        }
+
         private void SeekRelative(double offsetSeconds)
         {
             if (_decoder == null || !_decoder.IsRunning) return;
-            if (TimeSpan.TryParse(TxtTotalTime.Text, out TimeSpan total))
-            {
-                double totalSeconds = total.TotalSeconds;
-                if (totalSeconds <= 0) return;
-                double currentRatio = SliderTimeline.Value / 1000.0;
-                double currentSeconds = currentRatio * totalSeconds;
-                double targetSeconds = Math.Clamp(currentSeconds + offsetSeconds, 0, totalSeconds);
-                double targetRatio = targetSeconds / totalSeconds;
-                
-                _isUpdatingFromPlayer = true;
-                SliderTimeline.Value = targetRatio * 1000.0;
-                if (SliderTimelineFS != null) SliderTimelineFS.Value = targetRatio * 1000.0;
-                _isUpdatingFromPlayer = false;
+            
+            double totalSeconds = _decoder.DurationSeconds;
+            if (totalSeconds <= 0) return;
+            
+            double currentRatio = SliderTimeline.Value / 1000.0;
+            double currentSeconds = currentRatio * totalSeconds;
+            double targetSeconds = Math.Clamp(currentSeconds + offsetSeconds, 0, totalSeconds);
+            double targetRatio = targetSeconds / totalSeconds;
+            
+            _isUpdatingFromPlayer = true;
+            SliderTimeline.Value = targetRatio * 1000.0;
+            if (SliderTimelineFS != null) SliderTimelineFS.Value = targetRatio * 1000.0;
+            _isUpdatingFromPlayer = false;
 
-                _isSeeking = true;
-                _decoder.Seek(targetRatio);
-                _seekCount++;
-            }
+            _isSeeking = true;
+            _decoder.Seek(targetRatio);
+            _seekCount++;
         }
 
         private void BtnSpeed_Click(object sender, RoutedEventArgs e)
@@ -1176,17 +1476,27 @@ namespace JonPlayer
             menu.IsOpen = true;
         }
 
+        private void UpdateSpeedUI(double speed)
+        {
+            _currentSpeed = speed;
+            if (_decoder != null) _decoder.SetSpeed(speed);
+            
+            // Format without trailing .00 if it's an integer, etc.
+            string formattedSpeed = (speed % 1 == 0) ? $"{speed:F1}" : $"{speed:F2}";
+            string label = $"{formattedSpeed}x ▾";
+            
+            BtnSpeed.Content = label;
+            if (BtnSpeedFS != null) BtnSpeedFS.Content = label;
+            ShowToast($"재생 속도: {formattedSpeed}x");
+        }
+
         private void MenuItemSpeed_Click(object sender, RoutedEventArgs e)
         {
             if (_decoder == null) return;
             if (sender is System.Windows.Controls.MenuItem mi && mi.Tag != null
                 && double.TryParse(mi.Tag.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out double speed))
             {
-                _currentSpeed = speed;
-                _decoder.SetSpeed(speed);
-                string label = $"{mi.Header} ▾";
-                BtnSpeed.Content = label;
-                if (BtnSpeedFS != null) BtnSpeedFS.Content = label;
+                UpdateSpeedUI(speed);
             }
         }
 
@@ -1198,6 +1508,7 @@ namespace JonPlayer
         private void SliderTimeline_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
         {
             _isUserDraggingSlider = false;
+            // DragCompleted is the single authoritative seek trigger for drag operations
             if (sender is Slider slider) DoSeek(slider.Value);
         }
 
@@ -1206,16 +1517,15 @@ namespace JonPlayer
             Dispatcher.BeginInvoke(() =>
             {
                 if (VideoRotation != null)
-                {
-                    // If video was recorded vertically but stored sideways, apply the metadata rotation
                     VideoRotation.Angle = rotation;
-                }
             });
         }
 
         private void SliderTimeline_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (_isUpdatingFromPlayer) return;
+
+            // Keep the two sliders in sync
             if (SliderTimelineFS != null && sender == SliderTimeline)
             {
                 _isUpdatingFromPlayer = true;
@@ -1229,6 +1539,8 @@ namespace JonPlayer
                 _isUpdatingFromPlayer = false;
             }
 
+            // Only seek on direct click (not during drag — DragCompleted handles that,
+            // and not when the player is updating the slider position).
             if (!_isUserDraggingSlider)
             {
                 DoSeek(e.NewValue);
@@ -1238,6 +1550,7 @@ namespace JonPlayer
         private void SliderTimelineFS_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (_isUpdatingFromPlayer) return;
+            // Sync to main slider — SliderTimeline_ValueChanged will handle the seek
             _isUpdatingFromPlayer = true;
             SliderTimeline.Value = SliderTimelineFS.Value;
             _isUpdatingFromPlayer = false;
@@ -1245,8 +1558,13 @@ namespace JonPlayer
 
         private void DoSeek(double sliderValue)
         {
+            if (_decoder == null || !_decoder.IsRunning)
+            {
+                _isSeeking = false;
+                return;
+            }
             _isSeeking = true;
-            _decoder?.Seek(sliderValue / 1000.0);
+            _decoder.Seek(sliderValue / 1000.0);
             _seekCount++;
         }
 
@@ -1370,10 +1688,61 @@ namespace JonPlayer
             }
         }
 
-        private void CloseFile()
+        private void ShowToast(string message)
+        {
+            TxtToast.Text = message;
+            ToastOverlay.Visibility = Visibility.Visible;
+            _toastTimer.Stop();
+            _toastTimer.Start();
+        }
+
+        private void CaptureFrame()
+        {
+            if (VideoElement.Source == null) 
+            { 
+                ShowToast("캡처할 화면이 없습니다."); 
+                return; 
+            }
+            try
+            {
+                var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(
+                    (int)VideoElement.ActualWidth, (int)VideoElement.ActualHeight,
+                    96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+                var drawingVisual = new System.Windows.Media.DrawingVisual();
+                using (var context = drawingVisual.RenderOpen())
+                {
+                    var rect = new Rect(0, 0, VideoElement.ActualWidth, VideoElement.ActualHeight);
+                    context.DrawImage(VideoElement.Source, rect);
+                }
+                rtb.Render(drawingVisual);
+                
+                var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
+                
+                string downloadsPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+                string filename = $"JonPlayer_Snapshot_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+                string fullPath = System.IO.Path.Combine(downloadsPath, filename);
+                
+                using (var fs = new System.IO.FileStream(fullPath, System.IO.FileMode.Create))
+                {
+                    encoder.Save(fs);
+                }
+                ShowToast($"캡처 완료: {filename}");
+            }
+            catch (Exception ex)
+            {
+                ShowToast($"캡처 실패: {ex.Message}");
+            }
+        }
+
+        private async void CloseFile()
         {
             if (_decoder != null)
             {
+                if (_decoder.IsPlaying) TogglePlayPause();
+                
+                await Task.Delay(50);
+                
                 _decoder.Stop();
                 _decoder.Dispose();
                 _decoder = null;
@@ -1384,8 +1753,24 @@ namespace JonPlayer
                 _renderer = null;
             }
             if (VideoElement != null) VideoElement.Source = null;
+            if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
+            if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
+            if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
+            
             _currentFilePath = null;
             this.Title = "JonPlayer";
+            TxtNowPlaying.Text = "Pick Your Vibe";
+            
+            TxtCurrentTime.Text = "00:00:00";
+            TxtTotalTime.Text = "00:00:00";
+            if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = "00:00:00";
+            if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = "00:00:00";
+
+            SliderTimeline.Value = 0;
+            if (SliderTimelineFS != null) SliderTimelineFS.Value = 0;
+            SetRandomVibe();
+            
+            ShowToast("파일 닫기 완료");
         }
 
         private bool _isChangingFullscreen = false;
@@ -1491,8 +1876,11 @@ namespace JonPlayer
 
             switch (e.Key)
             {
+                case Key.F1:
+                    ShortcutsOverlay.Visibility = ShortcutsOverlay.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+                    e.Handled = true; break;
+
                 case Key.Space: TogglePlayPause(); e.Handled = true; break;
-                
                 case Key.Left: 
                     if (isCtrl) SeekRelative(-30);
                     else SeekRelative(-5); 
@@ -1561,10 +1949,47 @@ namespace JonPlayer
                     break;
                     
                 case Key.F: FitScreen(); e.Handled = true; break;
+                
+                case Key.Oem3:
+                    ResizeScreen(0.5); ShowToast("창 크기: 50%"); e.Handled = true; break;
                 case Key.D1:
-                case Key.NumPad1: ResizeScreen(1.0); e.Handled = true; break;
+                case Key.NumPad1: ResizeScreen(1.0); ShowToast("창 크기: 100%"); e.Handled = true; break;
                 case Key.D2:
-                case Key.NumPad2: ResizeScreen(2.0); e.Handled = true; break;
+                case Key.NumPad2: ResizeScreen(2.0); ShowToast("창 크기: 200%"); e.Handled = true; break;
+                
+                case Key.Z:
+                    if (VideoViewbox.Stretch == System.Windows.Media.Stretch.Uniform) {
+                        VideoViewbox.Stretch = System.Windows.Media.Stretch.UniformToFill;
+                        VideoElement.Stretch = System.Windows.Media.Stretch.UniformToFill;
+                        ShowToast("화면 맞춤: 가득 채우기 (자르기)");
+                    } else if (VideoViewbox.Stretch == System.Windows.Media.Stretch.UniformToFill) {
+                        VideoViewbox.Stretch = System.Windows.Media.Stretch.Fill;
+                        VideoElement.Stretch = System.Windows.Media.Stretch.Fill;
+                        ShowToast("화면 맞춤: 강제 늘림");
+                    } else {
+                        VideoViewbox.Stretch = System.Windows.Media.Stretch.Uniform;
+                        VideoElement.Stretch = System.Windows.Media.Stretch.Uniform;
+                        ShowToast("화면 맞춤: 원본 비율 (여백)");
+                    }
+                    e.Handled = true; break;
+
+                case Key.OemComma:
+                    if (_decoder != null) {
+                        double newSpeed = Math.Max(0.25, _decoder.PlaybackSpeed - 0.25);
+                        UpdateSpeedUI(newSpeed);
+                    }
+                    e.Handled = true; break;
+
+                case Key.OemPeriod:
+                    if (_decoder != null) {
+                        double newSpeed = Math.Min(4.0, _decoder.PlaybackSpeed + 0.25);
+                        UpdateSpeedUI(newSpeed);
+                    }
+                    e.Handled = true; break;
+
+                case Key.C:
+                    CaptureFrame();
+                    e.Handled = true; break;
                 
                 case Key.O:
                     if (isCtrl && isShift) { OpenFolder(); e.Handled = true; }
