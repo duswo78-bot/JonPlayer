@@ -621,7 +621,7 @@
             <Rectangle x:Name="MouseLayer" Fill="Transparent" IsHitTestVisible="True" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
 
             <!-- Subtitle UI -->
-            <Border x:Name="SubtitleBorder" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="20,0,20,80" Background="#A0000000" CornerRadius="8" Padding="16,8" IsHitTestVisible="True" Panel.ZIndex="50" Visibility="Collapsed" MouseLeftButtonDown="SubtitleBorder_MouseLeftButtonDown" MouseLeftButtonUp="SubtitleBorder_MouseLeftButtonUp" MouseMove="SubtitleBorder_MouseMove" Cursor="SizeAll">
+            <Border x:Name="SubtitleBorder" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="20,0,20,-20" Background="#A0000000" CornerRadius="8" Padding="16,8" IsHitTestVisible="True" Panel.ZIndex="50" Visibility="Collapsed" MouseLeftButtonDown="SubtitleBorder_MouseLeftButtonDown" MouseLeftButtonUp="SubtitleBorder_MouseLeftButtonUp" MouseMove="SubtitleBorder_MouseMove" Cursor="SizeAll">
                 <Border.RenderTransform>
                     <TransformGroup>
                         <TranslateTransform x:Name="SubtitleTransform" X="0" Y="0"/>
@@ -996,109 +996,109 @@
                                 </ScrollViewer.Resources>
                                 <StackPanel Orientation="Vertical">
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F1" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F1" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="단축키 안내 보기/숨기기 (Show / Hide Shortcuts)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Space" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Space" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="재생 / 일시정지 (Play / Pause)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F11" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="Enter" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F11" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="Enter" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="전체화면 전환 (Toggle Fullscreen)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Esc" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Esc" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="전체화면 종료 (Exit Fullscreen)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Z" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Z" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="창에 맞추기 (Toggle Stretch Mode)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="비디오에 창 크기 맞춤 (Fit to Video)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="`" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="1" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="2" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="`" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="1" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="2" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="창 크기 50% / 100% / 200%" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="&lt;" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="&gt;" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="&lt;" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="&gt;" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="재생 속도 감소 / 증가 (Speed Down / Up)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="←" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="→" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="←" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="→" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="5초 탐색 (Ctrl: 30s Jump)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="↑" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="↓" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="↑" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="↓" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="볼륨 조절 / 플레이리스트 이동" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="M" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="M" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="음소거 설정/해제 (Toggle Mute)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F9" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="Ctrl+L" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F9" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="Ctrl+L" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="플레이리스트 토글 (Toggle Playlist)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F3" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F3" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="통계 표시 (Toggle Stats)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     
                                     <!-- 자막 관련 추가 단축키 -->
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="W" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="A" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="S" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="D" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="W" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="A" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="S" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="D" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="자막 위치 이동 (Move Subtitle)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="+" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="-" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="+" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="-" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="자막 크기 확대 / 축소 (Subtitle Size)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+O" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+O" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="파일 열기 (Open File)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+Shift+O" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+Shift+O" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="폴더 열기 (Open Folder)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="C" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="C" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="화면 캡처 (Screenshot to Downloads)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+W" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold"/></Border>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+W" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="파일 닫기 (Close File)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                 </StackPanel>

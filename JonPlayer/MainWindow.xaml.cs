@@ -504,6 +504,7 @@ namespace JonPlayer
 
                 SetBrush("ToggleOnBrush", 0x00, 0x50, 0xC0); // 진한 파란색으로 가독성 개선
                 SetColor("ToggleOnGlowColor", 0x00, 0x50, 0xC0);
+                SetBrush("KeyTextBrush", 0x00, 0x40, 0xA0); // 더 진한 파란색으로 단축키 텍스트 표시
 
                 SetBrushAlpha("PlaylistBgBrush", 0x99, 0xFF, 0xFF, 0xFF);
                 SetBrushAlpha("PlaylistBorderBrush", 0x66, 0xAA, 0xAA, 0xAA);
@@ -533,6 +534,7 @@ namespace JonPlayer
 
                 SetBrush("ToggleOnBrush", 0x00, 0xE5, 0xFF); // 기존 네온 시안색
                 SetColor("ToggleOnGlowColor", 0x00, 0xE5, 0xFF);
+                SetBrush("KeyTextBrush", 0x1D, 0xB9, 0x54); // 기존 다크모드 초록색
 
                 SetBrushAlpha("PlaylistBgBrush", 0x99, 0x0A, 0x0A, 0x0A);
                 SetBrushAlpha("PlaylistBorderBrush", 0x40, 0xFF, 0xFF, 0xFF);
