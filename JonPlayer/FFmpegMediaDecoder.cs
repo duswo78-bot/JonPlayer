@@ -1372,6 +1372,16 @@ namespace JonPlayer
                 var f = (AVFrame*)pooledFrm;
                 ffmpeg.av_frame_free(&f);
             }
+
+            if (_bgraBufferHandle.IsAllocated)
+            {
+                _bgraBufferHandle.Free();
+            }
+
+            if (_audioBufferHandle.IsAllocated)
+            {
+                _audioBufferHandle.Free();
+            }
         }
 
         public void Dispose()
