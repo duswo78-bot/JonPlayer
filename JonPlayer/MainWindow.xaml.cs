@@ -1143,6 +1143,7 @@ namespace JonPlayer
             if (_isOpeningFile) return;
             _isOpeningFile = true;
 
+            FFmpegMediaDecoder? newDecoder = null;
             try
             {
                 _currentFilePath = path;
@@ -1169,13 +1170,13 @@ namespace JonPlayer
                     _renderer = new D3D11VideoRenderer();
                     if (VideoElement != null) VideoElement.Source = _renderer.D3DImage;
                 }
-                else
+                if (_renderer != null)
                 {
                     if (VideoElement != null && VideoElement.Source != _renderer.D3DImage)
                         VideoElement.Source = _renderer.D3DImage;
                 }
 
-                var newDecoder = new FFmpegMediaDecoder();
+                newDecoder = new FFmpegMediaDecoder();
                 newDecoder.SetSpeed(_currentSpeed);
                 if (_renderer != null)
                 {
@@ -1345,6 +1346,7 @@ namespace JonPlayer
             }
             catch (Exception ex)
             {
+                newDecoder?.Dispose();
                 WpfMessageBox.Show($"파일을 열 수 없습니다.\n{ex.Message}", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             finally
