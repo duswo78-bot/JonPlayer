@@ -502,6 +502,9 @@ namespace JonPlayer
                 SetBrush("ActiveBrush", 0xD1, 0xD1, 0xD6);
                 SetBrush("DividerBrush", 0xD8, 0xD8, 0xDC);
 
+                SetBrush("ToggleOnBrush", 0x00, 0x50, 0xC0); // 진한 파란색으로 가독성 개선
+                SetColor("ToggleOnGlowColor", 0x00, 0x50, 0xC0);
+
                 SetBrushAlpha("PlaylistBgBrush", 0x99, 0xFF, 0xFF, 0xFF);
                 SetBrushAlpha("PlaylistBorderBrush", 0x66, 0xAA, 0xAA, 0xAA);
                 SetBrushAlpha("PlaylistTopGlossBrush", 0x44, 0xFF, 0xFF, 0xFF);
@@ -527,6 +530,9 @@ namespace JonPlayer
                 SetBrush("ActiveBrush", 0x38, 0x38, 0x38);
                 SetBrush("DividerBrush", 0x2C, 0x2C, 0x2C);
 
+                SetBrush("ToggleOnBrush", 0x00, 0xE5, 0xFF); // 기존 네온 시안색
+                SetColor("ToggleOnGlowColor", 0x00, 0xE5, 0xFF);
+
                 SetBrushAlpha("PlaylistBgBrush", 0x99, 0x0A, 0x0A, 0x0A);
                 SetBrushAlpha("PlaylistBorderBrush", 0x40, 0xFF, 0xFF, 0xFF);
                 SetBrushAlpha("PlaylistTopGlossBrush", 0x18, 0xFF, 0xFF, 0xFF);
@@ -548,6 +554,11 @@ namespace JonPlayer
             var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
             brush.Freeze();
             this.Resources[key] = brush;
+        }
+
+        private void SetColor(string key, byte r, byte g, byte b)
+        {
+            this.Resources[key] = Color.FromRgb(r, g, b);
         }
 
         private void SetBrushAlpha(string key, byte a, byte r, byte g, byte b)

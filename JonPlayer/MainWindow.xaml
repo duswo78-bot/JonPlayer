@@ -483,10 +483,10 @@
                                 <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
                             </Trigger>
                             <Trigger Property="Tag" Value="On">
-                                <Setter Property="Foreground" Value="#00E5FF"/>
+                                <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
                                 <Setter Property="Effect">
                                     <Setter.Value>
-                                        <DropShadowEffect Color="#00E5FF" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                        <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
                                     </Setter.Value>
                                 </Setter>
                             </Trigger>
