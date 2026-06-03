@@ -995,91 +995,110 @@
                                     <Style TargetType="ScrollBar" BasedOn="{StaticResource ThinScrollBarStyle}"/>
                                 </ScrollViewer.Resources>
                                 <StackPanel Orientation="Vertical">
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F1" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F1" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="단축키 안내 보기/숨기기 (Show / Hide Shortcuts)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Space" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Space" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="재생 / 일시정지 (Play / Pause)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F11" Foreground="#1DB954" FontWeight="Bold"/></Border>
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="Enter" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F11" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="Enter" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="전체화면 전환 (Toggle Fullscreen)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Esc" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Esc" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="전체화면 종료 (Exit Fullscreen)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Z" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Z" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="창에 맞추기 (Toggle Stretch Mode)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="비디오에 창 크기 맞춤 (Fit to Video)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="`" Foreground="#1DB954" FontWeight="Bold"/></Border>
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="1" Foreground="#1DB954" FontWeight="Bold"/></Border>
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="2" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="`" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="1" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="2" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="창 크기 50% / 100% / 200% (Window Size 50/100/200%)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        <TextBlock Grid.Column="1" Text="창 크기 50% / 100% / 200%" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="&lt;" Foreground="#1DB954" FontWeight="Bold"/></Border>
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="&gt;" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="&lt;" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="&gt;" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="재생 속도 감소 / 증가 (Speed Down / Up)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="←" Foreground="#1DB954" FontWeight="Bold"/></Border>
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="→" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="←" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="→" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="5초 탐색 (Ctrl: 30s Jump)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="↑" Foreground="#1DB954" FontWeight="Bold"/></Border>
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="↓" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="↑" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="↓" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="볼륨 조절 / 플레이리스트 이동 (Volume / Playlist Nav)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        <TextBlock Grid.Column="1" Text="볼륨 조절 / 플레이리스트 이동" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="M" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="M" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="음소거 설정/해제 (Toggle Mute)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F9" Foreground="#1DB954" FontWeight="Bold"/></Border>
-                                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2"><TextBlock Text="Ctrl+L" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="F9" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="Ctrl+L" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="플레이리스트 토글 (Toggle Playlist)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F3" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F3" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="통계 표시 (Toggle Stats)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+O" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    
+                                    <!-- 자막 관련 추가 단축키 -->
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="W" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="A" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="S" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="D" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="자막 위치 이동 (Move Subtitle)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="+" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="-" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="자막 크기 확대 / 축소 (Subtitle Size)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+O" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="파일 열기 (Open File)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+Shift+O" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+Shift+O" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="폴더 열기 (Open Folder)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="C" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="C" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="화면 캡처 (Screenshot to Downloads)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="#22FFFFFF" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+W" Foreground="#1DB954" FontWeight="Bold"/></Border>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+W" Foreground="#1DB954" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="파일 닫기 (Close File)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                 </StackPanel>
@@ -1165,10 +1184,10 @@
                                                 <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
                                             </Trigger>
                                             <Trigger Property="Tag" Value="On">
-                                                <Setter Property="Foreground" Value="#00E5FF"/>
+                                                <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
                                                 <Setter Property="Effect">
                                                     <Setter.Value>
-                                                        <DropShadowEffect Color="#00E5FF" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                        <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
                                                     </Setter.Value>
                                                 </Setter>
                                             </Trigger>
@@ -1176,7 +1195,7 @@
                                     </ControlTemplate>
                                 </Button.Template>
                             </Button>
-                            <TextBlock x:Name="TxtWhisperProgressFS" Text="" Foreground="#00E5FF" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
+                            <TextBlock x:Name="TxtWhisperProgressFS" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
@@ -1264,10 +1283,10 @@
                                         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
                                     </Trigger>
                                     <Trigger Property="Tag" Value="On">
-                                        <Setter Property="Foreground" Value="#00E5FF"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
                                         <Setter Property="Effect">
                                             <Setter.Value>
-                                                <DropShadowEffect Color="#00E5FF" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
                                             </Setter.Value>
                                         </Setter>
                                     </Trigger>
@@ -1275,7 +1294,7 @@
                             </ControlTemplate>
                         </Button.Template>
                     </Button>
-                    <TextBlock x:Name="TxtWhisperProgress" Text="" Foreground="#00E5FF" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
+                    <TextBlock x:Name="TxtWhisperProgress" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
