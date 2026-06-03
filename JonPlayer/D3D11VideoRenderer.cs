@@ -71,8 +71,8 @@ namespace JonPlayer
                 try
                 {
                     D3DImage.Lock();
-                    D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer);
-                    D3DImage.Unlock();
+                    try { D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer); }
+                    finally { D3DImage.Unlock(); }
                 }
                 catch { }
             }
@@ -86,8 +86,8 @@ namespace JonPlayer
                 try
                 {
                     D3DImage.Lock();
-                    D3DImage.AddDirtyRect(new Int32Rect(0, 0, Width, Height));
-                    D3DImage.Unlock();
+                    try { D3DImage.AddDirtyRect(new Int32Rect(0, 0, Width, Height)); }
+                    finally { D3DImage.Unlock(); }
                 }
                 catch { }
             }
@@ -184,16 +184,25 @@ namespace JonPlayer
                     }";
 
                 Vortice.D3DCompiler.Compiler.Compile(vsCode, "VSMain", "vsCode", "vs_4_0", out Vortice.Direct3D.Blob vsBlob, out Vortice.Direct3D.Blob vsError);
-                if (vsError != null) throw new Exception("VS Error: " + vsError.AsString());
-                if (vsBlob != null) _vertexShader = _d3d11Device.CreateVertexShader(vsBlob.AsBytes());
+                using (vsBlob) using (vsError)
+                {
+                    if (vsError != null) throw new Exception("VS Error: " + vsError.AsString());
+                    if (vsBlob != null) _vertexShader = _d3d11Device.CreateVertexShader(vsBlob.AsBytes());
+                }
 
                 Vortice.D3DCompiler.Compiler.Compile(psCode, "PSMain", "psCode", "ps_4_0", out Vortice.Direct3D.Blob psBlob, out Vortice.Direct3D.Blob psError);
-                if (psError != null) throw new Exception("PS Error: " + psError.AsString());
-                if (psBlob != null) _pixelShader = _d3d11Device.CreatePixelShader(psBlob.AsBytes());
+                using (psBlob) using (psError)
+                {
+                    if (psError != null) throw new Exception("PS Error: " + psError.AsString());
+                    if (psBlob != null) _pixelShader = _d3d11Device.CreatePixelShader(psBlob.AsBytes());
+                }
 
                 Vortice.D3DCompiler.Compiler.Compile(psCodeArray, "PSMain", "psCodeArray", "ps_4_0", out Vortice.Direct3D.Blob psBlobArray, out Vortice.Direct3D.Blob psErrorArray);
-                if (psErrorArray != null) throw new Exception("PSArray Error: " + psErrorArray.AsString());
-                if (psBlobArray != null) _pixelShaderArray = _d3d11Device.CreatePixelShader(psBlobArray.AsBytes());
+                using (psBlobArray) using (psErrorArray)
+                {
+                    if (psErrorArray != null) throw new Exception("PSArray Error: " + psErrorArray.AsString());
+                    if (psBlobArray != null) _pixelShaderArray = _d3d11Device.CreatePixelShader(psBlobArray.AsBytes());
+                }
 
                 var samplerDesc = new SamplerDescription
                 {
@@ -271,8 +280,8 @@ namespace JonPlayer
                 if (D3DImage.Dispatcher.CheckAccess())
                 {
                     D3DImage.Lock();
-                    D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer);
-                    D3DImage.Unlock();
+                    try { D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer); }
+                    finally { D3DImage.Unlock(); }
                 }
                 else
                 {
@@ -281,8 +290,8 @@ namespace JonPlayer
                         try
                         {
                             D3DImage.Lock();
-                            D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer);
-                            D3DImage.Unlock();
+                            try { D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer); }
+                            finally { D3DImage.Unlock(); }
                         }
                         catch { }
                     }));
@@ -440,8 +449,8 @@ namespace JonPlayer
                 try
                 {
                     D3DImage.Lock();
-                    D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, IntPtr.Zero);
-                    D3DImage.Unlock();
+                    try { D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, IntPtr.Zero); }
+                    finally { D3DImage.Unlock(); }
                 }
                 catch { }
 
@@ -480,6 +489,10 @@ namespace JonPlayer
             CleanupResources();
             lock (_renderLock)
             {
+                _vertexShader?.Dispose(); _vertexShader = null;
+                _pixelShader?.Dispose(); _pixelShader = null;
+                _pixelShaderArray?.Dispose(); _pixelShaderArray = null;
+                _samplerState?.Dispose(); _samplerState = null;
                 _d3d9Device?.Dispose(); _d3d9Device = null;
                 _d3d9Ex?.Dispose(); _d3d9Ex = null;
                 _d3d11Context?.Dispose(); _d3d11Context = null;

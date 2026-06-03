@@ -672,6 +672,7 @@ namespace JonPlayer
                         continue;
                     }
                     ffmpeg.av_packet_unref(_packet);
+                    _isFinished = true;
                     break;
                 }
 
@@ -1180,6 +1181,15 @@ namespace JonPlayer
                                     1, null, null, null
                                 );
                             }
+
+                            if (_swsContext == null)
+                            {
+                                // sws_getContext failed — skip this frame
+                                if (swFrame != null) ReturnFrame(swFrame);
+                                ReturnFrame(_videoFrame);
+                                _videoFrame = GetFrame();
+                                continue;
+                            }
                             
                             byte*[] dstData = { (byte*)_bgraBufferPointer, null, null, null };
                             int[] dstLinesize = { _width * 4, 0, 0, 0 };
@@ -1313,6 +1323,18 @@ namespace JonPlayer
                 var f = _formatContext;
                 ffmpeg.avformat_close_input(&f);
                 _formatContext = null;
+            }
+
+            // Free pooled native objects to prevent memory leak
+            while (_packetPool.TryTake(out IntPtr pooledPkt))
+            {
+                var p = (AVPacket*)pooledPkt;
+                ffmpeg.av_packet_free(&p);
+            }
+            while (_framePool.TryTake(out IntPtr pooledFrm))
+            {
+                var f = (AVFrame*)pooledFrm;
+                ffmpeg.av_frame_free(&f);
             }
         }
 

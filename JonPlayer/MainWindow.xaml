@@ -644,19 +644,12 @@
                             <TranslateTransform x:Name="WhisperLoadingTranslate" X="0" Y="0" />
                         </TransformGroup>
                     </StackPanel.RenderTransform>
-                    <!-- Sparkle Icon with Gradient -->
-                    <Path Data="M 16 0 C 16 9, 23 16, 32 16 C 23 16, 16 23, 16 32 C 16 23, 9 16, 0 16 C 9 16, 16 9, 16 0 Z" 
-                          StrokeThickness="0" Stretch="Uniform" Width="48" Height="48" HorizontalAlignment="Center" Margin="0,0,0,16">
-                        <Path.Fill>
-                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                <GradientStop Color="#00E5FF" Offset="0.0"/>
-                                <GradientStop Color="#B400FF" Offset="1.0"/>
-                            </LinearGradientBrush>
-                        </Path.Fill>
-                        <Path.RenderTransform>
+                    <!-- JonPlayer Logo -->
+                    <Image Source="Assets/logo.png" Stretch="Uniform" Width="48" Height="48" HorizontalAlignment="Center" Margin="0,0,0,16">
+                        <Image.RenderTransform>
                             <RotateTransform x:Name="WhisperSpinner" Angle="0" CenterX="24" CenterY="24"/>
-                        </Path.RenderTransform>
-                    </Path>
+                        </Image.RenderTransform>
+                    </Image>
                     <TextBlock x:Name="TxtWhisperStatus" Text="Extracting Audio..." Foreground="White" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,0,0,10"/>
                     <ProgressBar x:Name="ProgWhisper" Width="300" Height="6" Maximum="100" Value="0" Foreground="#00E5FF" Background="#444" BorderThickness="0"/>
                 </StackPanel>

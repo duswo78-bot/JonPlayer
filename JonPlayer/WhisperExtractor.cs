@@ -108,17 +108,31 @@ namespace JonPlayer
 
         private static async Task DownloadModel(string fileName)
         {
-            var handler = new HttpClientHandler
+            var tempPath = fileName + ".tmp";
+            try
             {
-                UseDefaultCredentials = true,
-                UseProxy = true,
-                ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => { return true; }
-            };
-            using var client = new HttpClient(handler);
-            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-            using var stream = await client.GetStreamAsync("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin");
-            using var fileWriter = File.OpenWrite(fileName);
-            await stream.CopyToAsync(fileWriter);
+                var handler = new HttpClientHandler
+                {
+                    UseDefaultCredentials = true,
+                    UseProxy = true,
+                    ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => { return true; }
+                };
+                using var client = new HttpClient(handler);
+                client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+                using var stream = await client.GetStreamAsync("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin");
+                using var fileWriter = File.Create(tempPath);
+                await stream.CopyToAsync(fileWriter);
+                fileWriter.Close();
+
+                // Atomic replacement: only move if download completed successfully
+                File.Move(tempPath, fileName, true);
+            }
+            catch
+            {
+                // Clean up partial download
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                throw;
+            }
         }
 
         private static string FormatTime(TimeSpan time)

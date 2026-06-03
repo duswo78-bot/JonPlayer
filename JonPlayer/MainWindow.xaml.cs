@@ -212,10 +212,23 @@ namespace JonPlayer
             };
 
             Closed += (s, e) => {
+                // Stop all timers first to prevent null reference after disposal
+                _fsMousePollTimer.Stop();
+                _statsTimer.Stop();
+                _toastTimer.Stop();
+                _cursorHideTimer.Stop();
+                _fsVolumeTimer.Stop();
+                _notesTimer.Stop();
+                _playlistTimer?.Stop();
+
                 CancelWhisperExtraction();
                 _decoder?.Stop();
+                _decoder?.Dispose();
+                _decoder = null;
                 _waveOut?.Stop();
                 _waveOut?.Dispose();
+                _renderer?.Dispose();
+                _renderer = null;
                 timeEndPeriod(1);
             };
         }
@@ -1063,7 +1076,9 @@ namespace JonPlayer
 
         private void Decoder_PlaybackFinished()
         {
-            Dispatcher.Invoke(() =>
+            // Use BeginInvoke (async) instead of Invoke (sync) to prevent deadlock
+            // when decoder thread waits for UI and UI waits for decoder.Stop()/Join()
+            Dispatcher.BeginInvoke(new Action(() =>
             {
                 UpdatePlayPauseUI(false);
                 if (!PlayNext())
@@ -1102,7 +1117,7 @@ namespace JonPlayer
                         Task.Run(() => { oldDec.Stop(); oldDec.Dispose(); });
                     }
                 }
-            });
+            }));
         }
 
         private async void PlayFile(string path, double startRatio = 0.0)
@@ -1883,9 +1898,22 @@ namespace JonPlayer
             }
         }
 
+        private bool _wasPlayingBeforeDrag = false;
+
         private void SliderTimeline_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
         {
             _isUserDraggingSlider = true;
+            if (_decoder != null && _decoder.IsPlaying)
+            {
+                _wasPlayingBeforeDrag = true;
+                _decoder.Pause();
+                _waveOut?.Pause();
+                UpdatePlayPauseUI(false);
+            }
+            else
+            {
+                _wasPlayingBeforeDrag = false;
+            }
         }
 
         private void SliderTimeline_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
@@ -1893,6 +1921,13 @@ namespace JonPlayer
             _isUserDraggingSlider = false;
             // DragCompleted is the single authoritative seek trigger for drag operations
             if (sender is Slider slider) DoSeek(slider.Value);
+
+            if (_wasPlayingBeforeDrag && _decoder != null)
+            {
+                _decoder.Play();
+                _waveOut?.Play();
+                UpdatePlayPauseUI(true);
+            }
         }
 
         private void Decoder_RotationDetected(double rotation)
@@ -2548,19 +2583,7 @@ namespace JonPlayer
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
-            _fsMousePollTimer.Stop();
-
-            if (_decoder != null)
-            {
-                _decoder.Dispose();
-                _decoder = null;
-            }
-
-            if (_renderer != null)
-            {
-                _renderer.Dispose();
-                _renderer = null;
-            }
+            // All cleanup is handled in the Closed event handler (constructor)
         }
     }
 }
