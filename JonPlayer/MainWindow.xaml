@@ -620,6 +620,48 @@
 
             <Rectangle x:Name="MouseLayer" Fill="Transparent" IsHitTestVisible="True" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
 
+            <!-- Subtitle UI -->
+            <Border x:Name="SubtitleBorder" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="20,0,20,80" Background="#A0000000" CornerRadius="8" Padding="16,8" IsHitTestVisible="True" Panel.ZIndex="50" Visibility="Collapsed" MouseLeftButtonDown="SubtitleBorder_MouseLeftButtonDown" MouseLeftButtonUp="SubtitleBorder_MouseLeftButtonUp" MouseMove="SubtitleBorder_MouseMove" Cursor="SizeAll">
+                <Border.RenderTransform>
+                    <TransformGroup>
+                        <TranslateTransform x:Name="SubtitleTransform" X="0" Y="0"/>
+                        <TranslateTransform x:Name="FsSubtitleShift" X="0" Y="0"/>
+                    </TransformGroup>
+                </Border.RenderTransform>
+                <TextBlock x:Name="TxtSubtitle" Foreground="White" FontSize="26" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="1000">
+                    <TextBlock.Effect>
+                        <DropShadowEffect BlurRadius="4" ShadowDepth="2" Opacity="0.8" Color="Black"/>
+                    </TextBlock.Effect>
+                </TextBlock>
+            </Border>
+
+            <!-- Loading Overlay for Whisper -->
+            <Border x:Name="WhisperLoadingOverlay" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="#90000000" Visibility="Collapsed" Panel.ZIndex="200" IsHitTestVisible="True">
+                <StackPanel x:Name="WhisperLoadingPanel" VerticalAlignment="Center" HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                    <StackPanel.RenderTransform>
+                        <TransformGroup>
+                            <ScaleTransform x:Name="WhisperLoadingScale" ScaleX="1" ScaleY="1" />
+                            <TranslateTransform x:Name="WhisperLoadingTranslate" X="0" Y="0" />
+                        </TransformGroup>
+                    </StackPanel.RenderTransform>
+                    <!-- Sparkle Icon with Gradient -->
+                    <Path Data="M 16 0 C 16 9, 23 16, 32 16 C 23 16, 16 23, 16 32 C 16 23, 9 16, 0 16 C 9 16, 16 9, 16 0 Z" 
+                          StrokeThickness="0" Stretch="Uniform" Width="48" Height="48" HorizontalAlignment="Center" Margin="0,0,0,16">
+                        <Path.Fill>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                <GradientStop Color="#00E5FF" Offset="0.0"/>
+                                <GradientStop Color="#B400FF" Offset="1.0"/>
+                            </LinearGradientBrush>
+                        </Path.Fill>
+                        <Path.RenderTransform>
+                            <RotateTransform x:Name="WhisperSpinner" Angle="0" CenterX="24" CenterY="24"/>
+                        </Path.RenderTransform>
+                    </Path>
+                    <TextBlock x:Name="TxtWhisperStatus" Text="Extracting Audio..." Foreground="White" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+                    <ProgressBar x:Name="ProgWhisper" Width="300" Height="6" Maximum="100" Value="0" Foreground="#00E5FF" Background="#444" BorderThickness="0"/>
+                </StackPanel>
+            </Border>
+
             <Border x:Name="OverlayStats" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="10" Background="#CC000000" CornerRadius="5" IsHitTestVisible="False" Visibility="Collapsed" Panel.ZIndex="100">
                 <TextBlock x:Name="TxtOverlayStats" Foreground="#00FF00" FontFamily="Consolas" FontSize="12" LineHeight="18" Text="Stats..." />
             </Border>
@@ -1119,6 +1161,29 @@
                             </Button>
                             <Button x:Name="BtnRepeatFS" Style="{StaticResource TextToggleButton}" Content="REPEAT" Click="BtnRepeat_Click" Margin="0,0,8,0" ToolTip="Repeat Playlist"/>
                             <Button x:Name="BtnShuffleFS" Style="{StaticResource TextToggleButton}" Content="SHUFFLE" Click="BtnShuffle_Click" Margin="0,0,8,0" ToolTip="Shuffle Playlist"/>
+                            <Button x:Name="BtnWhisperFS" Style="{StaticResource TextToggleButton}" Content="CC+" Click="BtnWhisper_Click" Margin="4,0,8,0" ToolTip="Auto Generate Subtitle (Whisper)" Height="20" VerticalAlignment="Center">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                            </Trigger>
+                                            <Trigger Property="Tag" Value="On">
+                                                <Setter Property="Foreground" Value="#00E5FF"/>
+                                                <Setter Property="Effect">
+                                                    <Setter.Value>
+                                                        <DropShadowEffect Color="#00E5FF" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                            <TextBlock x:Name="TxtWhisperProgressFS" Text="" Foreground="#00E5FF" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
@@ -1195,6 +1260,29 @@
                     </Button>
                     <Button x:Name="BtnRepeat" Style="{StaticResource TextToggleButton}" Content="REPEAT" Click="BtnRepeat_Click" Margin="0,0,8,0" ToolTip="Repeat Playlist"/>
                     <Button x:Name="BtnShuffle" Style="{StaticResource TextToggleButton}" Content="SHUFFLE" Click="BtnShuffle_Click" Margin="0,0,8,0" ToolTip="Shuffle Playlist"/>
+                    <Button x:Name="BtnWhisper" Style="{StaticResource TextToggleButton}" Content="CC+" Click="BtnWhisper_Click" Margin="4,0,8,0" ToolTip="Auto Generate Subtitle (Whisper)" Height="20" VerticalAlignment="Center">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                    </Trigger>
+                                    <Trigger Property="Tag" Value="On">
+                                        <Setter Property="Foreground" Value="#00E5FF"/>
+                                        <Setter Property="Effect">
+                                            <Setter.Value>
+                                                <DropShadowEffect Color="#00E5FF" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                    <TextBlock x:Name="TxtWhisperProgress" Text="" Foreground="#00E5FF" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
