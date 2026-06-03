@@ -1747,9 +1747,10 @@ namespace JonPlayer
         {
             if (_whisperCts != null)
             {
-                _whisperCts.Cancel();
-                _whisperCts.Dispose();
-                _whisperCts = null;
+                try { _whisperCts.Cancel(); } catch { }
+                // DO NOT Dispose or set to null immediately. 
+                // Whisper.net's native code crashes with AccessViolation if the CancellationTokenSource 
+                // is disposed while its token is still being observed by the native process thread.
             }
         }
 

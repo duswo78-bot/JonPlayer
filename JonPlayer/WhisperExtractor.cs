@@ -36,7 +36,7 @@ namespace JonPlayer
                 await Task.Run(async () => 
                 {
                     using var whisperFactory = WhisperFactory.FromPath(modelName);
-                    using var processor = whisperFactory.CreateBuilder()
+                    await using var processor = whisperFactory.CreateBuilder()
                         .WithLanguage("auto")
                         .Build();
 
@@ -64,8 +64,7 @@ namespace JonPlayer
                 }, cancellationToken);
 
                 // Cleanup temp wav
-                if (File.Exists(tempWavPath))
-                    File.Delete(tempWavPath);
+                try { if (File.Exists(tempWavPath)) File.Delete(tempWavPath); } catch { }
 
                 onProgress("🪄 AI 가사 추출 중...", 100);
                 onComplete(srtPath, null);
@@ -73,18 +72,18 @@ namespace JonPlayer
             catch (OperationCanceledException)
             {
                 // Cleanup partial files
-                if (File.Exists(tempWavPath)) File.Delete(tempWavPath);
+                try { if (File.Exists(tempWavPath)) File.Delete(tempWavPath); } catch { }
                 string srtPath = Path.ChangeExtension(videoPath, ".srt");
-                if (File.Exists(srtPath)) File.Delete(srtPath);
+                try { if (File.Exists(srtPath)) File.Delete(srtPath); } catch { }
 
                 onComplete(null, "작업이 취소되었습니다.");
             }
             catch (Exception ex)
             {
                 // Cleanup partial files on error
-                if (File.Exists(tempWavPath)) File.Delete(tempWavPath);
+                try { if (File.Exists(tempWavPath)) File.Delete(tempWavPath); } catch { }
                 string srtPath = Path.ChangeExtension(videoPath, ".srt");
-                if (File.Exists(srtPath)) File.Delete(srtPath);
+                try { if (File.Exists(srtPath)) File.Delete(srtPath); } catch { }
 
                 Console.WriteLine($"Error during Whisper extraction: {ex.Message}");
                 string errorMsg = ex.Message;
