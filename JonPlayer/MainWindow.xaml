@@ -621,7 +621,7 @@
             <Rectangle x:Name="MouseLayer" Fill="Transparent" IsHitTestVisible="True" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
 
             <!-- Subtitle UI -->
-            <Border x:Name="SubtitleBorder" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="20,0,20,-20" Background="#A0000000" CornerRadius="8" Padding="16,8" IsHitTestVisible="True" Panel.ZIndex="50" Visibility="Collapsed" MouseLeftButtonDown="SubtitleBorder_MouseLeftButtonDown" MouseLeftButtonUp="SubtitleBorder_MouseLeftButtonUp" MouseMove="SubtitleBorder_MouseMove" Cursor="SizeAll">
+            <Border x:Name="SubtitleBorder" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="20,0,20,20" Background="#A0000000" CornerRadius="8" Padding="16,8" IsHitTestVisible="True" Panel.ZIndex="50" Visibility="Collapsed" MouseLeftButtonDown="SubtitleBorder_MouseLeftButtonDown" MouseLeftButtonUp="SubtitleBorder_MouseLeftButtonUp" MouseMove="SubtitleBorder_MouseMove" Cursor="SizeAll">
                 <Border.RenderTransform>
                     <TransformGroup>
                         <TranslateTransform x:Name="SubtitleTransform" X="0" Y="0"/>
