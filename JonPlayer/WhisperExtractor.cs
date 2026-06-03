@@ -18,7 +18,7 @@ namespace JonPlayer
                 // 1. Convert video audio to 16kHz 16-bit Mono WAV using NAudio
                 onProgress("🪄 AI 가사 추출 중...", 10);
                 cancellationToken.ThrowIfCancellationRequested();
-                await Task.Run(() => ExtractAudio(videoPath, tempWavPath), cancellationToken);
+                await Task.Run(() => ExtractAudio(videoPath, tempWavPath, cancellationToken), cancellationToken);
 
                 // 2. Download Whisper Model if it doesn't exist
                 string modelName = "ggml-small.bin";
@@ -26,7 +26,7 @@ namespace JonPlayer
                 {
                     onProgress("🪄 AI 가사 추출 중...", 30);
                     cancellationToken.ThrowIfCancellationRequested();
-                    await DownloadModel(modelName);
+                    await DownloadModel(modelName, cancellationToken);
                 }
 
                 // 3. Process with Whisper
@@ -96,17 +96,25 @@ namespace JonPlayer
             }
         }
 
-        private static void ExtractAudio(string inputPath, string outputPath)
+        private static void ExtractAudio(string inputPath, string outputPath, CancellationToken cancellationToken)
         {
             // Use MediaFoundationReader which can read the audio stream from video files on Windows
             using var reader = new MediaFoundationReader(inputPath);
             var outFormat = new WaveFormat(16000, 16, 1); // Whisper needs 16kHz, 16-bit, Mono
             using var resampler = new MediaFoundationResampler(reader, outFormat);
             resampler.ResamplerQuality = 60; // good quality
-            WaveFileWriter.CreateWaveFile(outputPath, resampler);
+            
+            using var writer = new WaveFileWriter(outputPath, outFormat);
+            byte[] buffer = new byte[81920];
+            int bytesRead;
+            while ((bytesRead = resampler.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                writer.Write(buffer, 0, bytesRead);
+            }
         }
 
-        private static async Task DownloadModel(string fileName)
+        private static async Task DownloadModel(string fileName, CancellationToken cancellationToken)
         {
             var tempPath = fileName + ".tmp";
             try
@@ -114,14 +122,15 @@ namespace JonPlayer
                 var handler = new HttpClientHandler
                 {
                     UseDefaultCredentials = true,
-                    UseProxy = true,
-                    ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => { return true; }
+                    UseProxy = true
+                    // Removed: ServerCertificateCustomValidationCallback to ensure standard secure TLS validation.
+                    // If enterprise proxy decryption causes issues, users should install the proper root CA.
                 };
                 using var client = new HttpClient(handler);
                 client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                using var stream = await client.GetStreamAsync("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin");
+                using var stream = await client.GetStreamAsync("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin", cancellationToken);
                 using var fileWriter = File.Create(tempPath);
-                await stream.CopyToAsync(fileWriter);
+                await stream.CopyToAsync(fileWriter, cancellationToken);
                 fileWriter.Close();
 
                 // Atomic replacement: only move if download completed successfully

@@ -1134,6 +1134,7 @@ namespace JonPlayer
             decoder.PositionChanged -= Decoder_PositionChanged;
             decoder.TimeUpdated -= Decoder_TimeUpdated;
             decoder.RotationDetected -= Decoder_RotationDetected;
+            decoder.SeekInitiated -= Decoder_SeekInitiated;
             decoder.SeekPerformed -= Decoder_SeekPerformed;
         }
 
@@ -1186,7 +1187,7 @@ namespace JonPlayer
                 newDecoder.TimeUpdated += Decoder_TimeUpdated;
                 newDecoder.PlaybackFinished += Decoder_PlaybackFinished;
                 newDecoder.RotationDetected += Decoder_RotationDetected;
-                newDecoder.SeekInitiated += () => { _waveProvider?.ClearBuffer(); };
+                newDecoder.SeekInitiated += Decoder_SeekInitiated;
                 newDecoder.SeekPerformed += Decoder_SeekPerformed;
                 newDecoder.GetAudioBufferedDurationMs = () => _waveProvider?.BufferedDuration.TotalMilliseconds ?? 0;
 
@@ -2011,6 +2012,11 @@ namespace JonPlayer
             _isSeeking = true;
             _decoder.Seek(sliderValue / 1000.0);
             _seekCount++;
+        }
+
+        private void Decoder_SeekInitiated()
+        {
+            _waveProvider?.ClearBuffer();
         }
 
         private void Decoder_SeekPerformed()

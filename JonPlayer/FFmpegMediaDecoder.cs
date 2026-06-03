@@ -221,14 +221,14 @@ namespace JonPlayer
                 _formatContext->interrupt_callback.callback = new FFmpeg.AutoGen.AVIOInterruptCB_callback_func { Pointer = Marshal.GetFunctionPointerForDelegate(_interruptCallback) };
                 _formatContext->interrupt_callback.opaque = null;
 
+                _formatContext->probesize = 5000000;
+                _formatContext->max_analyze_duration = 2 * FFmpeg.AutoGen.ffmpeg.AV_TIME_BASE;
+
                 fixed (AVFormatContext** pFormatContext = &_formatContext)
                 {
                     if (ffmpeg.avformat_open_input(pFormatContext, path, null, null) < 0)
                         throw new Exception("Could not open file");
                 }
-
-                _formatContext->probesize = 5000000;
-                _formatContext->max_analyze_duration = 2 * FFmpeg.AutoGen.ffmpeg.AV_TIME_BASE;
 
                 if (ffmpeg.avformat_find_stream_info(_formatContext, null) < 0)
                     throw new Exception("Could not find stream info");
