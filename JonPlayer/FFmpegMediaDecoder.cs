@@ -162,6 +162,15 @@ namespace JonPlayer
         private volatile bool _isSeekingAudio = false;
         private double _seekTargetPtsTime = -1;
         private bool _isDisposed;
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private unsafe delegate int InterruptCallbackDelegate(void* opaque);
+        private InterruptCallbackDelegate? _interruptCallback;
+        private volatile bool _isInterruptRequested = false;
+
+        private unsafe int InterruptCallback(void* opaque)
+        {
+            return _isInterruptRequested ? 1 : 0;
+        }
 
         private DecoderStats _stats;
         private int _framesDecodedThisSecond;
@@ -203,9 +212,15 @@ namespace JonPlayer
             
             _videoStreamIndex = -1;
             _audioStreamIndex = -1;
+            _isInterruptRequested = false;
 
             try
             {
+                _formatContext = ffmpeg.avformat_alloc_context();
+                _interruptCallback = new InterruptCallbackDelegate(InterruptCallback);
+                _formatContext->interrupt_callback.callback = new FFmpeg.AutoGen.AVIOInterruptCB_callback_func { Pointer = Marshal.GetFunctionPointerForDelegate(_interruptCallback) };
+                _formatContext->interrupt_callback.opaque = null;
+
                 fixed (AVFormatContext** pFormatContext = &_formatContext)
                 {
                     if (ffmpeg.avformat_open_input(pFormatContext, path, null, null) < 0)
@@ -299,7 +314,13 @@ namespace JonPlayer
                         {
                             var deviceCtx = (AVHWDeviceContext*)hwDeviceCtx->data;
                             var d3d11DeviceCtx = (AVD3D11VADeviceContext*)deviceCtx->hwctx;
+                            // FFmpeg will take ownership of these COM pointers and call Release() on them
+                            // when the hwdevice_ctx is freed. Therefore, we MUST AddRef them here to prevent
+                            // premature destruction of our D3D11 device and context.
+                            System.Runtime.InteropServices.Marshal.AddRef(_d3d11DevicePtr);
                             d3d11DeviceCtx->device = _d3d11DevicePtr;
+                            
+                            System.Runtime.InteropServices.Marshal.AddRef(_d3d11ContextPtr);
                             d3d11DeviceCtx->device_context = _d3d11ContextPtr;
 
                             if (ffmpeg.av_hwdevice_ctx_init(hwDeviceCtx) == 0)
@@ -540,6 +561,8 @@ namespace JonPlayer
 
         public void Stop()
         {
+            _isInterruptRequested = true;
+            if (!_isRunning) return;
             _isRunning = false;
             lock (_lock)
             {
@@ -549,15 +572,24 @@ namespace JonPlayer
 
             if (_readThread != null && _readThread.IsAlive)
             {
-                _readThread.Join();
+                if (!_readThread.Join(1000))
+                {
+                    System.Diagnostics.Debug.WriteLine("ReadThread join timed out.");
+                }
             }
             if (_videoThread != null && _videoThread.IsAlive)
             {
-                _videoThread.Join();
+                if (!_videoThread.Join(1000))
+                {
+                    System.Diagnostics.Debug.WriteLine("VideoThread join timed out.");
+                }
             }
             if (_audioThread != null && _audioThread.IsAlive)
             {
-                _audioThread.Join();
+                if (!_audioThread.Join(1000))
+                {
+                    System.Diagnostics.Debug.WriteLine("AudioThread join timed out.");
+                }
             }
 
             while (_videoPacketQueue.TryDequeue(out IntPtr p))
@@ -579,6 +611,8 @@ namespace JonPlayer
             double durationInSeconds = _formatContext != null ? _formatContext->duration / (double)ffmpeg.AV_TIME_BASE : 0;
             lock (_lock)
             {
+                _isSeekingVideo = true;
+                _isSeekingAudio = true;
                 _seekTargetPtsTime = ratio * durationInSeconds * 1000.0;
                 _seekTargetMs = _seekTargetPtsTime;
                 _isFinished = false;
@@ -1191,8 +1225,10 @@ namespace JonPlayer
                                 continue;
                             }
                             
-                            byte*[] dstData = { (byte*)_bgraBufferPointer, null, null, null };
-                            int[] dstLinesize = { _width * 4, 0, 0, 0 };
+                            byte*[] dstData = new byte*[8];
+                            dstData[0] = (byte*)_bgraBufferPointer;
+                            int[] dstLinesize = new int[8];
+                            dstLinesize[0] = _width * 4;
                             
                             ffmpeg.sws_scale(_swsContext, processedFrame->data, processedFrame->linesize, 0, processedFrame->height, dstData, dstLinesize);
                             

@@ -74,7 +74,7 @@ namespace JonPlayer
                     try { D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer); }
                     finally { D3DImage.Unlock(); }
                 }
-                catch { }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"D3D11VideoRenderer Initial Render Error: {ex.Message}"); }
             }
         }
 
@@ -89,7 +89,7 @@ namespace JonPlayer
                     try { D3DImage.AddDirtyRect(new Int32Rect(0, 0, Width, Height)); }
                     finally { D3DImage.Unlock(); }
                 }
-                catch { }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"D3D11VideoRenderer Render Loop Error: {ex.Message}"); }
             }
         }
 
@@ -293,7 +293,7 @@ namespace JonPlayer
                             try { D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _d3d9Surface.NativePointer); }
                             finally { D3DImage.Unlock(); }
                         }
-                        catch { }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"D3D11VideoRenderer Resize Async Error: {ex.Message}"); }
                     }));
                 }
             }
@@ -304,12 +304,16 @@ namespace JonPlayer
             }
         }
 
-        public void RenderFrame(IntPtr data, int width, int height, int stride, bool isHardwareTexture = false)
+        public void RenderFrame(IntPtr data, int width, int height, int stride, bool isHardwareTexture)
         {
-            if (_isDisposed || data == IntPtr.Zero || width <= 0 || height <= 0 || _d3d11Device == null) return;
-
+            if (data == IntPtr.Zero) return;
+            
             lock (_renderLock)
             {
+                if (_isDisposed || _d3d11Context == null || _renderTargetView == null) return;
+                
+                if (_isDirty) return; 
+
                 try
                 {
                     if (isHardwareTexture)
@@ -452,7 +456,7 @@ namespace JonPlayer
                     try { D3DImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, IntPtr.Zero); }
                     finally { D3DImage.Unlock(); }
                 }
-                catch { }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"D3D11VideoRenderer Detach Error: {ex.Message}"); }
 
                 D3DImage.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ContextIdle, new Action(() =>
                 {
@@ -487,17 +491,39 @@ namespace JonPlayer
                 }));
             }
             CleanupResources();
+            // Capture device objects to dispose them AFTER the textures are disposed
+            Vortice.Direct3D11.ID3D11VertexShader? oldVs;
+            Vortice.Direct3D11.ID3D11PixelShader? oldPs;
+            Vortice.Direct3D11.ID3D11PixelShader? oldPsArr;
+            Vortice.Direct3D11.ID3D11SamplerState? oldSampler;
+            Vortice.Direct3D9.IDirect3DDevice9Ex? oldD3d9Device;
+            Vortice.Direct3D9.IDirect3D9Ex? oldD3d9Ex;
+            Vortice.Direct3D11.ID3D11DeviceContext? oldD3d11Context;
+            Vortice.Direct3D11.ID3D11Device? oldD3d11Device;
+
             lock (_renderLock)
             {
-                _vertexShader?.Dispose(); _vertexShader = null;
-                _pixelShader?.Dispose(); _pixelShader = null;
-                _pixelShaderArray?.Dispose(); _pixelShaderArray = null;
-                _samplerState?.Dispose(); _samplerState = null;
-                _d3d9Device?.Dispose(); _d3d9Device = null;
-                _d3d9Ex?.Dispose(); _d3d9Ex = null;
-                _d3d11Context?.Dispose(); _d3d11Context = null;
-                _d3d11Device?.Dispose(); _d3d11Device = null;
+                oldVs = _vertexShader; _vertexShader = null;
+                oldPs = _pixelShader; _pixelShader = null;
+                oldPsArr = _pixelShaderArray; _pixelShaderArray = null;
+                oldSampler = _samplerState; _samplerState = null;
+                oldD3d9Device = _d3d9Device; _d3d9Device = null;
+                oldD3d9Ex = _d3d9Ex; _d3d9Ex = null;
+                oldD3d11Context = _d3d11Context; _d3d11Context = null;
+                oldD3d11Device = _d3d11Device; _d3d11Device = null;
             }
+
+            D3DImage.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ContextIdle, new Action(() =>
+            {
+                oldVs?.Dispose();
+                oldPs?.Dispose();
+                oldPsArr?.Dispose();
+                oldSampler?.Dispose();
+                oldD3d9Device?.Dispose();
+                oldD3d9Ex?.Dispose();
+                oldD3d11Context?.Dispose();
+                oldD3d11Device?.Dispose();
+            }));
         }
     }
 }

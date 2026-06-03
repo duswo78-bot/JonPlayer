@@ -211,7 +211,7 @@ namespace JonPlayer
                 FsSubtitleShift.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, anim);
             };
 
-            Closed += (s, e) => {
+            Closing += (s, e) => {
                 // Stop all timers first to prevent null reference after disposal
                 _fsMousePollTimer.Stop();
                 _statsTimer.Stop();
@@ -222,9 +222,13 @@ namespace JonPlayer
                 _playlistTimer?.Stop();
 
                 CancelWhisperExtraction();
-                _decoder?.Stop();
-                _decoder?.Dispose();
-                _decoder = null;
+                if (_decoder != null)
+                {
+                    DetachDecoderEvents(_decoder);
+                    _decoder.Stop();
+                    _decoder.Dispose();
+                    _decoder = null;
+                }
                 _waveOut?.Stop();
                 _waveOut?.Dispose();
                 _renderer?.Dispose();
@@ -1114,10 +1118,23 @@ namespace JonPlayer
                     {
                         var oldDec = _decoder;
                         _decoder = null;
+                        DetachDecoderEvents(oldDec);
                         Task.Run(() => { oldDec.Stop(); oldDec.Dispose(); });
                     }
                 }
             }));
+        }
+
+        private void DetachDecoderEvents(FFmpegMediaDecoder decoder)
+        {
+            if (decoder == null) return;
+            decoder.PlaybackFinished -= Decoder_PlaybackFinished;
+            decoder.FrameDecoded -= Decoder_FrameDecoded;
+            decoder.AudioDataAvailable -= Decoder_AudioDataAvailable;
+            decoder.PositionChanged -= Decoder_PositionChanged;
+            decoder.TimeUpdated -= Decoder_TimeUpdated;
+            decoder.RotationDetected -= Decoder_RotationDetected;
+            decoder.SeekPerformed -= Decoder_SeekPerformed;
         }
 
         private async void PlayFile(string path, double startRatio = 0.0)
@@ -1132,19 +1149,13 @@ namespace JonPlayer
 
                 TxtNowPlaying.Text = "Loading...";
 
-                if (_renderer != null)
-                {
-                    _renderer.Dispose();
-                    _renderer = null;
-                }
-                if (VideoElement != null) VideoElement.Source = null;
-
                 var oldDecoder = _decoder;
                 _decoder = null;
                 
                 if (oldDecoder != null)
                 {
-                    oldDecoder.PlaybackFinished -= Decoder_PlaybackFinished;
+                    DetachDecoderEvents(oldDecoder);
+                    
                     await Task.Run(() => 
                     {
                         oldDecoder.Stop();
@@ -1152,8 +1163,16 @@ namespace JonPlayer
                     });
                 }
 
-                _renderer = new D3D11VideoRenderer();
-                VideoElement.Source = _renderer.D3DImage;
+                if (_renderer == null)
+                {
+                    _renderer = new D3D11VideoRenderer();
+                    if (VideoElement != null) VideoElement.Source = _renderer.D3DImage;
+                }
+                else
+                {
+                    if (VideoElement != null && VideoElement.Source != _renderer.D3DImage)
+                        VideoElement.Source = _renderer.D3DImage;
+                }
 
                 var newDecoder = new FFmpegMediaDecoder();
                 newDecoder.SetSpeed(_currentSpeed);
@@ -1340,7 +1359,8 @@ namespace JonPlayer
             _decoder = null;
             if (oldDecoder != null)
             {
-                oldDecoder.PlaybackFinished -= Decoder_PlaybackFinished;
+                DetachDecoderEvents(oldDecoder);
+                
                 await Task.Run(() => 
                 {
                     oldDecoder.Stop();
@@ -1919,8 +1939,15 @@ namespace JonPlayer
         private void SliderTimeline_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
         {
             _isUserDraggingSlider = false;
-            // DragCompleted is the single authoritative seek trigger for drag operations
-            if (sender is Slider slider) DoSeek(slider.Value);
+            
+            Slider? targetSlider = sender as Slider;
+            if (targetSlider == null && e.OriginalSource is System.Windows.Controls.Primitives.Thumb thumb)
+            {
+                targetSlider = thumb.TemplatedParent as Slider;
+            }
+            if (targetSlider == null) targetSlider = SliderTimeline;
+            
+            DoSeek(targetSlider.Value);
 
             if (_wasPlayingBeforeDrag && _decoder != null)
             {
