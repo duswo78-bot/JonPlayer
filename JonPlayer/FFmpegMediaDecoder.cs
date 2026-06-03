@@ -961,7 +961,7 @@ namespace JonPlayer
             var stopwatch = new Stopwatch();
             var decodeTimer = new Stopwatch();
             double currentPlaybackPtsTime = 0;
-            double targetSeekMs = -1;
+
 
             while (_isRunning)
             {

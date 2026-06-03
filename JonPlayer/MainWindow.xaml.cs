@@ -955,7 +955,7 @@ namespace JonPlayer
         {
         }
 
-        private static T FindAncestor<T>(DependencyObject current) where T : DependencyObject
+        private static T? FindAncestor<T>(DependencyObject current) where T : DependencyObject
         {
             do
             {
@@ -1649,7 +1649,7 @@ namespace JonPlayer
             brush.BeginAnimation(System.Windows.Media.SolidColorBrush.ColorProperty, anim);
         }
 
-        private void StopRainbowBlink(System.Windows.Controls.TextBlock target)
+        private void StopRainbowBlink(System.Windows.Controls.TextBlock? target)
         {
             if (target == null) return;
             target.Visibility = Visibility.Collapsed;
@@ -1740,7 +1740,7 @@ namespace JonPlayer
             bgBrush.BeginAnimation(System.Windows.Media.SolidColorBrush.ColorProperty, bgFade);
         }
 
-        private CancellationTokenSource _whisperCts;
+        private CancellationTokenSource? _whisperCts;
 
         private void CancelWhisperExtraction()
         {

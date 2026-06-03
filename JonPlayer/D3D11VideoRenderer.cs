@@ -395,7 +395,7 @@ namespace JonPlayer
                     }
                 }
 
-                if (_renderTargetView == null || _d3d11Texture == null || _d3d11OffscreenTexture == null || _srvY == null || _srvUV == null) return;
+                if (_d3d11Context == null || _d3d11DecodeTexture == null || _renderTargetView == null || _d3d11Texture == null || _d3d11OffscreenTexture == null || _srvY == null || _srvUV == null) return;
 
                 var box = new Vortice.Mathematics.Box { Left = 0, Top = 0, Front = 0, Right = trueWidth, Bottom = trueHeight, Back = 1 };
                 _d3d11Context.CopySubresourceRegion(_d3d11DecodeTexture, 0, 0, 0, 0, hwTexture, (uint)sliceIndex, box);
