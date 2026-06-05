@@ -19,6 +19,10 @@ A modern, high-performance media player built with C#, WPF, and FFmpeg. JonPlaye
   - Volume control with mute functionality.
   - State memory (automatically remembers and restores the last played media after finishing).
 - **Fullscreen & Multi-Monitor:** Intelligent fullscreen mode that properly fills the monitor where the window is currently located, with standard keyboard shortcuts.
+- **PIP, Streaming, & Shaders:**
+  - **PIP (Picture-in-Picture):** Multi-tasking support with a floating video window.
+  - **Streaming:** Support for network streaming protocols (RTSP, HLS, etc.).
+  - **HLSL Shaders:** Custom shader support for real-time video filtering and enhancement.
 - **Keyboard Shortcuts:**
   - `Space`: Play / Pause
   - `Esc`: Exit Fullscreen
