@@ -1,4 +1,4 @@
-#define MyAppVersion GetFileVersion("bin\Release\net8.0-windows\JonPlayerApp.exe")
+#define MyAppVersion "1.0.0"
 [Setup]
 AppName=JonPlayer
 AppVersion={#MyAppVersion}

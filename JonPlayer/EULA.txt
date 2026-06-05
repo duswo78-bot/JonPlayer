@@ -4,8 +4,8 @@ JonPlayer is a media platform software project developed by Park, Yeon Jae.
 본 소프트웨어는 사내 임직원의 업무 편의와 멀티미디어 활용을 위해 제공됩니다.
 This software is provided for the business convenience and multimedia utilization of internal employees.
 
-본 소프트웨어는 영원히 광고가 포함되지 않은 완전 무료 소프트웨어(Freeware)로 제공됩니다.
-This software is provided forever as completely ad-free freeware.
+본 소프트웨어는 광고가 포함되지 않은 무료 소프트웨어(Freeware)로 제공됩니다.
+This software is provided as ad-free freeware.
 
 1. 사용 권한
 1. License
