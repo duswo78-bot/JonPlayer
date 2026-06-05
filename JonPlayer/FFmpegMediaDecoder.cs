@@ -40,6 +40,7 @@ namespace JonPlayer
 
     public unsafe class FFmpegMediaDecoder : IDisposable
     {
+        public static bool EnableHwAccel = true;
         private AVFormatContext* _formatContext;
         
         // Video
@@ -162,6 +163,18 @@ namespace JonPlayer
         private volatile bool _isSeekingAudio = false;
         private double _seekTargetPtsTime = -1;
         private bool _isDisposed;
+        
+        // Audio Filter Properties
+        public double AudioVolumeLevel { get; private set; } = 1.0;
+        public double AudioVocalGain { get; private set; } = 0.0;
+
+        // Video Filter Properties
+        public double VideoBrightness { get; private set; } = 0.0;
+        public double VideoContrast { get; private set; } = 1.0;
+        public double VideoSaturation { get; private set; } = 1.0;
+        private volatile bool _videoFiltersChanged = false;
+        private volatile bool _rebuildAudioFilters = false;
+
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private unsafe delegate int InterruptCallbackDelegate(void* opaque);
         private InterruptCallbackDelegate? _interruptCallback;
@@ -307,7 +320,7 @@ namespace JonPlayer
                     _videoCodecContext->get_format = new AVCodecContext_get_format_func { Pointer = Marshal.GetFunctionPointerForDelegate(_getFormatCallback) };
 
                     AVBufferRef* hwDeviceCtx = null;
-                    if (_d3d11DevicePtr != IntPtr.Zero)
+                    if (EnableHwAccel && _d3d11DevicePtr != IntPtr.Zero)
                     {
                         hwDeviceCtx = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
                         if (hwDeviceCtx != null)
@@ -331,7 +344,7 @@ namespace JonPlayer
                         }
                     }
 
-                    if (_videoCodecContext->hw_device_ctx == null)
+                    if (EnableHwAccel && _videoCodecContext->hw_device_ctx == null)
                     {
                         if (ffmpeg.av_hwdevice_ctx_create(&hwDeviceCtx, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0) == 0)
                         {
@@ -489,7 +502,7 @@ namespace JonPlayer
             int ret1 = ffmpeg.avfilter_graph_create_filter(&abufferCtx, abuffer, "in", args, null, _audioFilterGraph);
             if (ret1 < 0) 
             {
-                System.Diagnostics.Debug.WriteLine($"Failed to create abuffer filter. Error: {ret1}. Args: {args}");
+                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to create abuffer filter. Error: {ret1}. Args: {args}\n");
                 fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
                 return;
             }
@@ -498,11 +511,11 @@ namespace JonPlayer
             int ret2 = ffmpeg.avfilter_graph_create_filter(&abuffersinkCtx, abuffersink, "out", null, null, _audioFilterGraph);
             if (ret2 < 0) 
             {
+                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to create abuffersink filter. Error: {ret2}\n");
                 fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
                 return;
             }
-
-            string filterDesc = $"atempo={_playbackSpeed.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            string filterDesc = $"equalizer@feq=f=1000:width_type=h:width=200:g={AudioVocalGain.ToString(System.Globalization.CultureInfo.InvariantCulture)},volume@fvol=volume={AudioVolumeLevel.ToString(System.Globalization.CultureInfo.InvariantCulture)},atempo@fatempo={_playbackSpeed.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
             AVFilterInOut* outputs = ffmpeg.avfilter_inout_alloc();
             AVFilterInOut* inputs = ffmpeg.avfilter_inout_alloc();
@@ -517,15 +530,19 @@ namespace JonPlayer
             inputs->pad_idx = 0;
             inputs->next = null;
 
-            if (ffmpeg.avfilter_graph_parse_ptr(_audioFilterGraph, filterDesc, &inputs, &outputs, null) < 0)
+            int parseRet = ffmpeg.avfilter_graph_parse_ptr(_audioFilterGraph, filterDesc, &inputs, &outputs, null);
+            if (parseRet < 0)
             {
+                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to parse filterDesc. Error: {parseRet}. String: {filterDesc}\n");
                 ffmpeg.avfilter_inout_free(&inputs);
                 ffmpeg.avfilter_inout_free(&outputs);
                 fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
                 return;
             }
-            if (ffmpeg.avfilter_graph_config(_audioFilterGraph, null) < 0)
+            int configRet = ffmpeg.avfilter_graph_config(_audioFilterGraph, null);
+            if (configRet < 0)
             {
+                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to config filter graph. Error: {configRet}\n");
                 ffmpeg.avfilter_inout_free(&inputs);
                 ffmpeg.avfilter_inout_free(&outputs);
                 fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
@@ -537,9 +554,8 @@ namespace JonPlayer
 
             _abufferCtx = abufferCtx;
             _abuffersinkCtx = abuffersinkCtx;
-            
-            // Find atempo filter
-            _atempoCtx = ffmpeg.avfilter_graph_get_filter(_audioFilterGraph, "Parsed_atempo_0");
+
+            _atempoCtx = ffmpeg.avfilter_graph_get_filter(_audioFilterGraph, "fatempo");
         }
 
         public void Play()
@@ -632,10 +648,32 @@ namespace JonPlayer
                     if (_audioFilterGraph != null && _atempoCtx != null)
                     {
                         string speedStr = speed.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                        ffmpeg.avfilter_graph_send_command(_audioFilterGraph, "Parsed_atempo_0", "tempo", speedStr, null, 0, 0);
+                        ffmpeg.avfilter_graph_send_command(_audioFilterGraph, "fatempo", "tempo", speedStr, null, 0, 0);
                     }
                     Monitor.PulseAll(_lock);
                 }
+            }
+        }
+
+        public void SetAudioFilters(double? volume = null, double? vocal = null)
+        {
+            lock (_lock)
+            {
+                if (volume.HasValue) AudioVolumeLevel = volume.Value;
+                if (vocal.HasValue) AudioVocalGain = vocal.Value;
+
+                _rebuildAudioFilters = true;
+            }
+        }
+
+        public void SetVideoFilters(double? brightness = null, double? contrast = null, double? saturation = null)
+        {
+            lock (_lock)
+            {
+                if (brightness.HasValue) VideoBrightness = brightness.Value;
+                if (contrast.HasValue) VideoContrast = contrast.Value;
+                if (saturation.HasValue) VideoSaturation = saturation.Value;
+                _videoFiltersChanged = true;
             }
         }
 
@@ -807,6 +845,12 @@ namespace JonPlayer
                             }
                             
                             if (isCorrupt) continue;
+
+                            if (_rebuildAudioFilters)
+                            {
+                                InitAudioFilterGraph();
+                                _rebuildAudioFilters = false;
+                            }
 
                             if (_audioFilterGraph != null && _abufferCtx != null && _abuffersinkCtx != null)
                             {
@@ -1223,6 +1267,28 @@ namespace JonPlayer
                                 ReturnFrame(_videoFrame);
                                 _videoFrame = GetFrame();
                                 continue;
+                            }
+
+                            if (_videoFiltersChanged)
+                            {
+                                int* inv_table = null;
+                                int srcRange;
+                                int* table = null;
+                                int dstRange;
+                                int b, c, s;
+                                if (ffmpeg.sws_getColorspaceDetails(_swsContext, &inv_table, &srcRange, &table, &dstRange, &b, &c, &s) >= 0 && inv_table != null && table != null)
+                                {
+                                    var inv = new FFmpeg.AutoGen.int_array4();
+                                    inv[0] = inv_table[0]; inv[1] = inv_table[1]; inv[2] = inv_table[2]; inv[3] = inv_table[3];
+                                    var tbl = new FFmpeg.AutoGen.int_array4();
+                                    tbl[0] = table[0]; tbl[1] = table[1]; tbl[2] = table[2]; tbl[3] = table[3];
+
+                                    ffmpeg.sws_setColorspaceDetails(_swsContext, inv, srcRange, tbl, dstRange,
+                                        (int)(VideoBrightness * 255.0 * 65536.0),
+                                        (int)(VideoContrast * 65536.0),
+                                        (int)(VideoSaturation * 65536.0));
+                                }
+                                _videoFiltersChanged = false;
                             }
                             
                             byte*[] dstData = new byte*[8];

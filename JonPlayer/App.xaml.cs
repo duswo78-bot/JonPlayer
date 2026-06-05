@@ -1,3 +1,10 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 
 namespace JonPlayer
@@ -7,6 +14,79 @@ namespace JonPlayer
     /// </summary>
     public partial class App : System.Windows.Application
     {
+        private static Mutex? _mutex;
+        private const string PipeName = "JonPlayer_SingleInstancePipe";
+
+        protected override void OnStartup(StartupEventArgs e)
+        {
+            const string appName = "JonPlayerApp_Mutex";
+            _mutex = new Mutex(true, appName, out bool createdNew);
+
+            if (!createdNew)
+            {
+                // Another instance is already running. Send args via named pipe.
+                if (e.Args.Length > 0)
+                {
+                    try
+                    {
+                        using (var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out))
+                        {
+                            client.Connect(2000);
+                            using (var writer = new StreamWriter(client))
+                            {
+                                writer.WriteLine(string.Join("|", e.Args));
+                                writer.Flush();
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                Current.Shutdown();
+                return;
+            }
+
+            // This is the first instance. Start named pipe server to listen for new files.
+            Task.Run(ListenForArgs);
+
+            base.OnStartup(e);
+        }
+
+        private void ListenForArgs()
+        {
+            while (true)
+            {
+                try
+                {
+                    using (var server = new NamedPipeServerStream(PipeName, PipeDirection.In, 1, PipeTransmissionMode.Message, PipeOptions.Asynchronous))
+                    {
+                        server.WaitForConnection();
+                        using (var reader = new StreamReader(server))
+                        {
+                            string? argsStr = reader.ReadLine();
+                            if (!string.IsNullOrEmpty(argsStr))
+                            {
+                                string[] args = argsStr.Split('|');
+                                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                                {
+                                    if (System.Windows.Application.Current.MainWindow is MainWindow win)
+                                    {
+                                        if (win.WindowState == WindowState.Minimized)
+                                            win.WindowState = WindowState.Normal;
+                                        win.Activate();
+                                        win.LoadExternalFiles(args);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    Thread.Sleep(500); // Backoff on error
+                }
+            }
+        }
+
         public App()
         {
             // 전역 예외 처리기 (UI 스레드)

@@ -40,8 +40,15 @@ namespace JonPlayer
         private ID3D11VertexShader? _vertexShader;
         private ID3D11PixelShader? _pixelShader;
         private ID3D11PixelShader? _pixelShaderArray;
+        private ID3D11PixelShader? _enhancedPixelShader;
         private ID3D11SamplerState? _samplerState;
         private bool _shadersInitialized;
+        private bool _useEnhancedShader;
+
+        public void EnableEnhancedShader(bool enable)
+        {
+            _useEnhancedShader = enable;
+        }
 
         private ID3D11Texture2D? _d3d11DecodeTexture;
         private ID3D11Texture2D? _d3d11OffscreenTexture;
@@ -183,6 +190,34 @@ namespace JonPlayer
                         return float4(saturate(rgb), 1.0);
                     }";
 
+                string psEnhancedCode = @"
+                    Texture2D texY : register(t0);
+                    Texture2D texUV : register(t1);
+                    SamplerState samLinear : register(s0);
+                    struct PS_IN { float4 Pos : SV_POSITION; float2 Tex : TEXCOORD; };
+                    static const float3x3 YUVtoRGB = float3x3(1.16438, 0.00000, 1.79274, 1.16438, -0.21325, -0.53291, 1.16438, 2.11240, 0.00000);
+                    
+                    float3 GetRGB(float2 uvCoords) {
+                        float y = texY.Sample(samLinear, uvCoords).r - 0.0625;
+                        float2 uv = texUV.Sample(samLinear, uvCoords).rg - 0.5;
+                        return saturate(mul(YUVtoRGB, float3(y, uv.x, uv.y)));
+                    }
+
+                    float4 PSMain(PS_IN input) : SV_Target {
+                        float3 center = GetRGB(input.Tex);
+                        float dx = 1.0 / 1920.0;
+                        float dy = 1.0 / 1080.0;
+                        float3 left = GetRGB(input.Tex + float2(-dx, 0));
+                        float3 right = GetRGB(input.Tex + float2(dx, 0));
+                        float3 top = GetRGB(input.Tex + float2(0, -dy));
+                        float3 bottom = GetRGB(input.Tex + float2(0, dy));
+                        
+                        float3 sharpened = center * 1.5 - (left + right + top + bottom) * 0.125;
+                        float luma = dot(sharpened, float3(0.299, 0.587, 0.114));
+                        float3 boosted = lerp(float3(luma, luma, luma), sharpened, 1.2);
+                        return float4(saturate(boosted), 1.0);
+                    }";
+
                 Vortice.D3DCompiler.Compiler.Compile(vsCode, "VSMain", "vsCode", "vs_4_0", out Vortice.Direct3D.Blob vsBlob, out Vortice.Direct3D.Blob vsError);
                 using (vsBlob) using (vsError)
                 {
@@ -202,6 +237,13 @@ namespace JonPlayer
                 {
                     if (psErrorArray != null) throw new Exception("PSArray Error: " + psErrorArray.AsString());
                     if (psBlobArray != null) _pixelShaderArray = _d3d11Device.CreatePixelShader(psBlobArray.AsBytes());
+                }
+
+                Vortice.D3DCompiler.Compiler.Compile(psEnhancedCode, "PSMain", "psEnhancedCode", "ps_4_0", out Vortice.Direct3D.Blob psBlobEnhanced, out Vortice.Direct3D.Blob psErrorEnhanced);
+                using (psBlobEnhanced) using (psErrorEnhanced)
+                {
+                    if (psErrorEnhanced != null) throw new Exception("PSEnhanced Error: " + psErrorEnhanced.AsString());
+                    if (psBlobEnhanced != null) _enhancedPixelShader = _d3d11Device.CreatePixelShader(psBlobEnhanced.AsBytes());
                 }
 
                 var samplerDesc = new SamplerDescription
@@ -390,7 +432,6 @@ namespace JonPlayer
                     {
                         _d3d11Context.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleList);
                         _d3d11Context.VSSetShader(_vertexShader);
-                        _d3d11Context.PSSetShader(_pixelShader);
                         _d3d11Context.PSSetSampler(0, _samplerState);
                     }
                 }
@@ -402,6 +443,7 @@ namespace JonPlayer
 
                 _d3d11Context.OMSetRenderTargets(_renderTargetView);
                 _d3d11Context.RSSetViewport(new Vortice.Mathematics.Viewport(0, 0, trueWidth, trueHeight));
+                _d3d11Context.PSSetShader(_useEnhancedShader && _enhancedPixelShader != null ? _enhancedPixelShader : _pixelShader);
                 _d3d11Context.PSSetShaderResources(0, new[] { _srvY, _srvUV });
                 _d3d11Context.Draw(3, 0);
 
@@ -495,6 +537,7 @@ namespace JonPlayer
             Vortice.Direct3D11.ID3D11VertexShader? oldVs;
             Vortice.Direct3D11.ID3D11PixelShader? oldPs;
             Vortice.Direct3D11.ID3D11PixelShader? oldPsArr;
+            Vortice.Direct3D11.ID3D11PixelShader? oldEnhancedPs;
             Vortice.Direct3D11.ID3D11SamplerState? oldSampler;
             Vortice.Direct3D9.IDirect3DDevice9Ex? oldD3d9Device;
             Vortice.Direct3D9.IDirect3D9Ex? oldD3d9Ex;
@@ -506,6 +549,7 @@ namespace JonPlayer
                 oldVs = _vertexShader; _vertexShader = null;
                 oldPs = _pixelShader; _pixelShader = null;
                 oldPsArr = _pixelShaderArray; _pixelShaderArray = null;
+                oldEnhancedPs = _enhancedPixelShader; _enhancedPixelShader = null;
                 oldSampler = _samplerState; _samplerState = null;
                 oldD3d9Device = _d3d9Device; _d3d9Device = null;
                 oldD3d9Ex = _d3d9Ex; _d3d9Ex = null;
@@ -518,6 +562,7 @@ namespace JonPlayer
                 oldVs?.Dispose();
                 oldPs?.Dispose();
                 oldPsArr?.Dispose();
+                oldEnhancedPs?.Dispose();
                 oldSampler?.Dispose();
                 oldD3d9Device?.Dispose();
                 oldD3d9Ex?.Dispose();

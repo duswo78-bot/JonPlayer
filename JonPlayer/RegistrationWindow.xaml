@@ -1,0 +1,52 @@
+<Window x:Class="JonPlayer.RegistrationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Welcome to JonPlayer" Height="450" Width="400"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock Text="Welcome to JonPlayer" FontSize="18" FontWeight="Bold"/>
+            <TextBlock Text="JonPlayer에 오신 것을 환영합니다" FontSize="12" Foreground="Gray" Margin="0,2,0,0"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Margin="0,0,0,15">
+            <TextBlock Text="Developed by Park, Yeon Jae" FontSize="13"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Margin="0,0,0,15">
+            <TextBlock Text="Help improve JonPlayer by registering your installation." FontSize="12" TextWrapping="Wrap"/>
+            <TextBlock Text="설치 등록을 통해 JonPlayer 개선에 참여해 주세요." FontSize="12" Foreground="Gray" Margin="0,2,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <CheckBox x:Name="ChkIsAptiv" Grid.Row="3" Content="I am an APTIV Employee (APTIV 직원입니다)" Margin="0,0,0,15" Checked="ChkIsAptiv_Checked" Unchecked="ChkIsAptiv_Unchecked"/>
+
+        <StackPanel x:Name="PanelInput" Grid.Row="4" Visibility="Collapsed">
+            <StackPanel Margin="0,0,0,10">
+                <TextBlock Text="Name (이름):" Margin="0,0,0,3"/>
+                <TextBox x:Name="TxtName" Height="24" Padding="2" VerticalContentAlignment="Center" TextChanged="Input_TextChanged"/>
+            </StackPanel>
+
+            <StackPanel Margin="0,0,0,10">
+                <TextBlock Text="Email (이메일):" Margin="0,0,0,3"/>
+                <TextBox x:Name="TxtEmail" Height="24" Padding="2" VerticalContentAlignment="Center" Text="@aptiv.com" TextChanged="Input_TextChanged" GotKeyboardFocus="TxtEmail_GotKeyboardFocus"/>
+            </StackPanel>
+        </StackPanel>
+
+        <Grid Grid.Row="6" Margin="0,10,0,0">
+            <TextBlock x:Name="TxtSkip" Text="Skip (건너뛰기)" TextDecorations="Underline" Cursor="Hand" Foreground="#555555" HorizontalAlignment="Left" VerticalAlignment="Center" MouseLeftButtonDown="BtnSkip_Click"/>
+            <Button x:Name="BtnRegister" Content="Register (등록)" Width="100" Height="26" HorizontalAlignment="Right" Click="BtnRegister_Click" Visibility="Collapsed" IsEnabled="False"/>
+        </Grid>
+    </Grid>
+</Window>

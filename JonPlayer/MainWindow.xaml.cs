@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
 using System.Windows;
+using YoutubeExplode.Videos.Streams;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
@@ -87,6 +88,8 @@ namespace JonPlayer
         
         private WaveOutEvent? _waveOut;
         private BufferedWaveProvider? _waveProvider;
+        private AudioEnhancerProvider? _audioEnhancer;
+        private Thread? _uiUpdateThread;
 
         private bool _isUserDraggingSlider;
         private bool _isUpdatingFromPlayer;
@@ -159,10 +162,107 @@ namespace JonPlayer
             }
         }
 
+        private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (ControlBar != null)
+            {
+                if (e.NewSize.Width < 950)
+                {
+                    double scale = e.NewSize.Width / 950.0;
+                    if (scale < 0.5) scale = 0.5;
+                    ControlBar.LayoutTransform = new System.Windows.Media.ScaleTransform(scale, scale);
+                }
+                else
+                {
+                    ControlBar.LayoutTransform = null;
+                }
+            }
+        }
+
+        private void CheckRegistrationAndWhisper()
+        {
+            // 1. Check Whisper installation
+            bool whisperInstalled = true; // default to true in case registry fails/not running from setup
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\JonPlayer"))
+                {
+                    if (key != null)
+                    {
+                        var val = key.GetValue("WhisperInstalled");
+                        if (val != null) whisperInstalled = (int)val == 1;
+                    }
+                }
+            }
+            catch { }
+
+            if (!whisperInstalled)
+            {
+                if (BtnWhisper != null) BtnWhisper.Visibility = Visibility.Collapsed;
+                if (BtnWhisperFS != null) BtnWhisperFS.Visibility = Visibility.Collapsed;
+            }
+
+            // 2. Check Registration
+            bool hasLaunched = false;
+            bool isAptivEmployee = false;
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\JonPlayer"))
+                {
+                    if (key != null)
+                    {
+                        var valHasLaunched = key.GetValue("HasLaunchedBefore");
+                        if (valHasLaunched != null) hasLaunched = (int)valHasLaunched == 1;
+
+                        var valAptiv = key.GetValue("IsAptivEmployee");
+                        if (valAptiv != null) isAptivEmployee = (int)valAptiv == 1;
+                    }
+                }
+            }
+            catch { }
+
+            if (!hasLaunched)
+            {
+                var regWindow = new RegistrationWindow();
+                regWindow.Owner = this;
+                regWindow.ShowDialog();
+
+                isAptivEmployee = regWindow.IsRegisteredEmployee;
+            }
+
+            if (isAptivEmployee && AptivLogoPanel != null)
+            {
+                AptivLogoPanel.Visibility = Visibility.Visible;
+            }
+        }
+
+        public void LoadExternalFiles(string[] files)
+        {
+            if (files != null && files.Length > 0)
+            {
+                var validFiles = files.Where(f => System.IO.File.Exists(f)).ToArray();
+                if (validFiles.Length > 0)
+                {
+                    LoadPlaylist(validFiles);
+                }
+            }
+        }
+
         public MainWindow()
         {
             InitializeComponent();
             SetRandomVibe();
+
+            this.Loaded += (s, e) =>
+            {
+                CheckRegistrationAndWhisper();
+
+                var args = Environment.GetCommandLineArgs();
+                if (args.Length > 1)
+                {
+                    LoadExternalFiles(args.Skip(1).ToArray());
+                }
+            };
 
             this.StateChanged += Window_StateChanged;
             this.MouseMove += Window_MouseMove;
@@ -175,7 +275,7 @@ namespace JonPlayer
 
             _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _toastTimer.Tick += (s, e) => { ToastOverlay.Visibility = Visibility.Collapsed; _toastTimer.Stop(); };
-            
+
             _cursorHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _cursorHideTimer.Tick += (s, e) =>
             {
@@ -210,6 +310,8 @@ namespace JonPlayer
                 };
                 FsSubtitleShift.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, anim);
             };
+
+            this.SizeChanged += MainWindow_SizeChanged;
 
             Closing += (s, e) => {
                 // Stop all timers first to prevent null reference after disposal
@@ -366,8 +468,15 @@ namespace JonPlayer
         {
             if (e.ClickCount == 2)
             {
-                ToggleFullscreen();
+                if (_isPipMode) TogglePipMode();
+                else ToggleFullscreen();
                 e.Handled = true;
+                return;
+            }
+
+            if (_isPipMode && e.ButtonState == MouseButtonState.Pressed)
+            {
+                try { this.DragMove(); } catch { }
                 return;
             }
 
@@ -583,6 +692,7 @@ namespace JonPlayer
         }
 
         private void BtnOpen_Click(object sender, RoutedEventArgs e) => OpenFile();
+        private void BtnOpenUrl_Click(object sender, RoutedEventArgs e) => OpenUrl();
 
         public class PlaylistItem : System.ComponentModel.INotifyPropertyChanged
         {
@@ -641,6 +751,21 @@ namespace JonPlayer
             }
         }
 
+        private void OpenUrl()
+        {
+            var dlg = new InputWindow();
+            dlg.Owner = this;
+            dlg.Resources = this.Resources;
+            if (dlg.ShowDialog() == true)
+            {
+                var url = dlg.InputUrl;
+                if (!string.IsNullOrEmpty(url))
+                {
+                    LoadPlaylist(new[] { url });
+                }
+            }
+        }
+
         private void OpenFolder()
         {
             using (var dialog = new System.Windows.Forms.FolderBrowserDialog())
@@ -679,7 +804,7 @@ namespace JonPlayer
                 ListPlaylist.ScrollIntoView(_playlist[_playlistIndex]);
         }
 
-        private void LoadPlaylist(string[] files)
+        private async void LoadPlaylist(string[] files)
         {
             _playlist.Clear();
             _playedIndices.Clear();
@@ -690,12 +815,40 @@ namespace JonPlayer
                 ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a"
             };
 
+            var youtube = new YoutubeExplode.YoutubeClient();
+
             foreach (var f in files) 
             {
-                string ext = System.IO.Path.GetExtension(f);
-                if (allowedExts.Contains(ext))
+                string path = f;
+                bool isYoutube = f.Contains("youtube.com") || f.Contains("youtu.be");
+                string title = isYoutube ? f : System.IO.Path.GetFileName(f);
+
+                if (isYoutube)
                 {
-                    _playlist.Add(new PlaylistItem { Name = System.IO.Path.GetFileName(f), Path = f });
+                    try
+                    {
+                        var video = await youtube.Videos.GetAsync(f);
+                        title = video.Title;
+                        var streamManifest = await youtube.Videos.Streams.GetManifestAsync(f);
+                        var muxedStreams = streamManifest.GetMuxedStreams();
+                        var streamInfo = muxedStreams.GetWithHighestVideoQuality();
+                        if (streamInfo != null)
+                        {
+                            path = streamInfo.Url;
+                        }
+                    }
+                    catch { }
+                }
+
+                bool isUrl = path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || 
+                             path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                             path.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase) ||
+                             path.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase);
+
+                string ext = System.IO.Path.GetExtension(f);
+                if (isUrl || isYoutube || allowedExts.Contains(ext))
+                {
+                    _playlist.Add(new PlaylistItem { Name = isUrl && !isYoutube ? f : title, Path = path });
                 }
             }
 
@@ -1162,6 +1315,12 @@ namespace JonPlayer
             try
             {
                 _currentFilePath = path;
+                bool isUrl = path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || 
+                             path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                             path.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase) ||
+                             path.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase);
+                if (BtnWhisper != null) BtnWhisper.IsEnabled = !isUrl;
+                if (BtnWhisperFS != null) BtnWhisperFS.IsEnabled = !isUrl;
                 _openCount++;
 
                 TxtNowPlaying.Text = "Loading...";
@@ -1455,8 +1614,17 @@ namespace JonPlayer
                     DiscardOnBufferOverflow = true
                 };
 
+                var sampleProvider = _waveProvider.ToSampleProvider();
+                // We ensure it is stereo (if mono, ToStereo() must be called, but assuming 2 channels as per current pipeline)
+                if (sampleProvider.WaveFormat.Channels == 1) sampleProvider = sampleProvider.ToStereo();
+                
+                _audioEnhancer = new AudioEnhancerProvider(sampleProvider)
+                {
+                    IsEnhancerEnabled = BtnBass.Tag?.ToString() == "On"
+                };
+
                 _waveOut = new WaveOutEvent { DesiredLatency = 100 };
-                _waveOut.Init(_waveProvider);
+                _waveOut.Init(_audioEnhancer);
                 if (SliderVolume != null)
                 {
                 _waveOut.Volume = _isMuted ? 0 : (float)(SliderVolume.Value / 100.0);
@@ -1770,6 +1938,23 @@ namespace JonPlayer
                 // is disposed while its token is still being observed by the native process thread.
             }
         }
+        private void BtnBass_Click(object sender, RoutedEventArgs e)
+        {
+            if (BtnBass.Tag?.ToString() == "On")
+            {
+                BtnBass.Tag = null;
+                if (BtnBassFS != null) BtnBassFS.Tag = null;
+                if (_audioEnhancer != null) _audioEnhancer.IsEnhancerEnabled = false;
+                ShowToast("Bass Boost: OFF");
+            }
+            else
+            {
+                BtnBass.Tag = "On";
+                if (BtnBassFS != null) BtnBassFS.Tag = "On";
+                if (_audioEnhancer != null) _audioEnhancer.IsEnhancerEnabled = true;
+                ShowToast("Bass Boost: ON");
+            }
+        }
 
         private async void BtnWhisper_Click(object sender, RoutedEventArgs e)
         {
@@ -1840,7 +2025,8 @@ namespace JonPlayer
                 catch { }
             });
 
-            await WhisperExtractor.ExtractSubtitlesAsync(_currentFilePath, "temp_audio.wav", (status, progress) => {
+            string tempWavPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "temp_audio.wav");
+            await WhisperExtractor.ExtractSubtitlesAsync(_currentFilePath, tempWavPath, (status, progress) => {
                 Dispatcher.InvokeAsync(() => {
                     int percentage = (int)progress; // 10% ~ 100%
                     
@@ -2139,6 +2325,83 @@ namespace JonPlayer
             else EnterFullscreen();
         }
 
+        private bool _isPipMode = false;
+        private WindowStyle _backupWindowStyle;
+        private bool _backupTopmost;
+        private Rect _backupBounds;
+        private double _backupMinWidth;
+        private double _backupMinHeight;
+
+        private void BtnPip_Click(object sender, RoutedEventArgs e) => TogglePipMode();
+
+        private void TogglePipMode()
+        {
+            if (_isPipMode) ExitPipMode();
+            else EnterPipMode();
+        }
+
+        private bool _isEnhancedShaderEnabled = false;
+        private void ToggleEnhancedShader()
+        {
+            _isEnhancedShaderEnabled = !_isEnhancedShaderEnabled;
+            if (_renderer != null)
+            {
+                _renderer.EnableEnhancedShader(_isEnhancedShaderEnabled);
+                ShowToast($"Enhanced Shader: {(_isEnhancedShaderEnabled ? "ON" : "OFF")}");
+            }
+        }
+
+        private void EnterPipMode()
+        {
+            if (_isPipMode || _isFullscreen) return;
+            _isPipMode = true;
+
+            _backupWindowStyle = this.WindowStyle;
+            _backupTopmost = this.Topmost;
+            _backupBounds = new Rect(this.Left, this.Top, this.Width, this.Height);
+            _backupMinWidth = this.MinWidth;
+            _backupMinHeight = this.MinHeight;
+
+            this.MinWidth = 0;
+            this.MinHeight = 0;
+
+            RowTitleBar.Height = new GridLength(0);
+            RowTimeline.Height = new GridLength(0);
+            RowControls.Height = new GridLength(0);
+
+            this.WindowStyle = WindowStyle.None;
+            this.Topmost = true;
+            this.Width = 400;
+            this.Height = 225;
+            
+            var screen = System.Windows.Forms.Screen.FromHandle(new System.Windows.Interop.WindowInteropHelper(this).Handle);
+            this.Left = screen.WorkingArea.Right - this.Width - 20;
+            this.Top = screen.WorkingArea.Bottom - this.Height - 20;
+
+            if (BtnPip != null) BtnPip.ToolTip = "Exit PIP Mode (P)";
+        }
+
+        private void ExitPipMode()
+        {
+            if (!_isPipMode) return;
+            _isPipMode = false;
+
+            this.WindowStyle = _backupWindowStyle;
+            this.Topmost = _backupTopmost;
+            this.MinWidth = _backupMinWidth;
+            this.MinHeight = _backupMinHeight;
+            this.Left = _backupBounds.Left;
+            this.Top = _backupBounds.Top;
+            this.Width = _backupBounds.Width;
+            this.Height = _backupBounds.Height;
+
+            RowTitleBar.Height = new GridLength(40);
+            RowTimeline.Height = GridLength.Auto;
+            RowControls.Height = GridLength.Auto;
+
+            if (BtnPip != null) BtnPip.ToolTip = "PIP Mode (P)";
+        }
+
         private void FitScreen()
         {
             if (_isFullscreen) ExitFullscreen();
@@ -2147,6 +2410,12 @@ namespace JonPlayer
 
         private void ResizeScreen(double scale)
         {
+            if (_isPipMode)
+            {
+                this.Width = 400 * scale;
+                this.Height = 225 * scale;
+                return;
+            }
             if (_isFullscreen) ExitFullscreen();
             if (this.WindowState == WindowState.Maximized) this.WindowState = WindowState.Normal;
             
@@ -2336,6 +2605,22 @@ namespace JonPlayer
             _fsMousePollTimer.Stop();
         }
 
+        private void BtnToggleMediaShortcuts_Click(object sender, RoutedEventArgs e)
+        {
+            if (MediaShortcutsPanel.Visibility == Visibility.Collapsed)
+            {
+                MediaShortcutsPanel.Visibility = Visibility.Visible;
+                BasicShortcutsPanel.Visibility = Visibility.Collapsed;
+                BtnToggleMediaShortcuts.Content = "◀ Basic Shortcuts";
+            }
+            else
+            {
+                MediaShortcutsPanel.Visibility = Visibility.Collapsed;
+                BasicShortcutsPanel.Visibility = Visibility.Visible;
+                BtnToggleMediaShortcuts.Content = "Media Filters ▶";
+            }
+        }
+
         private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.OriginalSource is WpfTextBox || e.OriginalSource is WpfComboBox) return;
@@ -2343,7 +2628,9 @@ namespace JonPlayer
             bool isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
             bool isShift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
 
-            switch (e.Key)
+            Key actualKey = e.Key == Key.System ? e.SystemKey : (e.Key == Key.ImeProcessed ? e.ImeProcessedKey : e.Key);
+
+            switch (actualKey)
             {
                 case Key.F1:
                     ShortcutsOverlay.Visibility = ShortcutsOverlay.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
@@ -2392,18 +2679,60 @@ namespace JonPlayer
                     }
                     e.Handled = true; break;
                 
-                case Key.M: ToggleMute(); e.Handled = true; break;
+                case Key.M: 
+                    if (isCtrl) { VideoScale.ScaleX = VideoScale.ScaleX == 1 ? -1 : 1; ShowToast("Mirror Mode (H-Flip): " + (VideoScale.ScaleX == -1 ? "ON" : "OFF")); }
+                    else { ToggleMute(); }
+                    e.Handled = true; break;
+
                 case Key.F11: ToggleFullscreen(); e.Handled = true; break;
 
-                // Subtitle position shortcuts
+                // --- Video & Audio Filter Shortcuts ---
                 case Key.W: 
                     if (isCtrl) { CloseFile(); }
-                    else { SubtitleTransform.Y -= 10; }
-                    e.Handled = true; 
+                    else if (isShift) { SubtitleTransform.Y -= 10; }
+                    e.Handled = true; break;
+                case Key.S: 
+                    if (isShift) { SubtitleTransform.Y += 10; }
+                    e.Handled = true; break;
+                case Key.D:
+                    if (isShift) { SubtitleTransform.X += 10; e.Handled = true; }
                     break;
-                case Key.S: SubtitleTransform.Y += 10; e.Handled = true; break;
-                case Key.A: SubtitleTransform.X -= 10; e.Handled = true; break;
-                case Key.D: SubtitleTransform.X += 10; e.Handled = true; break;
+                case Key.A:
+                    if (isShift) { SubtitleTransform.X -= 10; e.Handled = true; }
+                    break;
+                case Key.R:
+                    if (isShift && _decoder != null) { _decoder.SetAudioFilters(1.0, 0.0); if (_audioEnhancer != null) _audioEnhancer.IsEnhancerEnabled = false; ShowToast("Audio Filters Reset"); e.Handled = true; }
+                    break;
+                case Key.F:
+                    if (!isCtrl && !isShift) { FitScreen(); e.Handled = true; }
+                    break;
+                case Key.P:
+                    if (!isCtrl && !isShift) { TogglePipMode(); e.Handled = true; }
+                    break;
+                case Key.H:
+                    if (!isCtrl && !isShift) { ToggleEnhancedShader(); e.Handled = true; }
+                    break;
+                case Key.Q:
+                    if (!isCtrl && !isShift && _decoder != null) { _decoder.SetVideoFilters(0.0, 1.0, 1.0); ShowToast("Video Colors Reset"); e.Handled = true; }
+                    break;
+                case Key.V:
+                    if (isCtrl) { VideoScale.ScaleY = VideoScale.ScaleY == 1 ? -1 : 1; ShowToast("Vertical Flip: " + (VideoScale.ScaleY == -1 ? "ON" : "OFF")); e.Handled = true; }
+                    else if (isShift && _decoder != null) { _decoder.SetAudioFilters(vocal: _decoder.AudioVocalGain == 0 ? 10.0 : 0.0); ShowToast($"Vocal Boost: {(_decoder.AudioVocalGain > 0 ? "ON" : "OFF")}"); e.Handled = true; }
+                    break;
+                case Key.B:
+                    if (isShift) { BtnBass_Click(null, null); e.Handled = true; }
+                    break;
+                case Key.O:
+                    if (isShift && !isCtrl && _decoder != null) { _decoder.SetAudioFilters(volume: _decoder.AudioVolumeLevel == 1.0 ? 3.0 : 1.0); ShowToast($"Overdrive Volume: {(_decoder.AudioVolumeLevel > 1.0 ? "ON" : "OFF")}"); e.Handled = true; }
+                    else if (isCtrl && isShift) { OpenFolder(); e.Handled = true; }
+                    else if (isCtrl) { OpenFile(); e.Handled = true; }
+                    break;
+                case Key.U:
+                    if (isCtrl) { OpenUrl(); e.Handled = true; }
+                    break;
+                case Key.N:
+                    if (isShift) { ShowToast("Denoise filter not available in SW/D3D11 yet."); e.Handled = true; }
+                    break;
                 
                 // Subtitle font size shortcuts
                 case Key.OemPlus:
@@ -2435,10 +2764,11 @@ namespace JonPlayer
                 case Key.F3: ToggleStatsOverlay(); e.Handled = true; break;
                 
                 case Key.Escape:
-                    if (_isFullscreen) { ExitFullscreen(); e.Handled = true; }
+                    if (_isPipMode) { ExitPipMode(); e.Handled = true; break; }
+                    if (_isFullscreen) { ExitFullscreen(); e.Handled = true; break; }
                     break;
                     
-                case Key.F: FitScreen(); e.Handled = true; break;
+                    // Key.F merged above
                 
                 case Key.Oem3:
                     ResizeScreen(0.5); ShowToast("창 크기: 50%"); e.Handled = true; break;
@@ -2481,10 +2811,7 @@ namespace JonPlayer
                     CaptureFrame();
                     e.Handled = true; break;
                 
-                case Key.O:
-                    if (isCtrl && isShift) { OpenFolder(); e.Handled = true; }
-                    else if (isCtrl) { OpenFile(); e.Handled = true; }
-                    break;
+                    // Key.O merged above
                     
 
                     
@@ -2627,10 +2954,6 @@ namespace JonPlayer
             }
         }
 
-        private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
-        {
-            // No custom Hwnd sync is needed as WPF native Image adapts automatically.
-        }
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {

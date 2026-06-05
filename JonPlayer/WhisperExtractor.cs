@@ -20,13 +20,11 @@ namespace JonPlayer
                 cancellationToken.ThrowIfCancellationRequested();
                 await Task.Run(() => ExtractAudio(videoPath, tempWavPath, cancellationToken), cancellationToken);
 
-                // 2. Download Whisper Model if it doesn't exist
-                string modelName = "ggml-small.bin";
+                // 2. Check if Whisper Model exists (Bundled)
+                string modelName = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ggml-small.bin");
                 if (!File.Exists(modelName))
                 {
-                    onProgress("🪄 AI 가사 추출 중...", 30);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    await DownloadModel(modelName, cancellationToken);
+                    throw new FileNotFoundException($"자막 모델 파일을 찾을 수 없습니다. ({modelName}) 설치 시 자막 구성 요소를 포함했는지 확인해 주세요.");
                 }
 
                 // 3. Process with Whisper
@@ -86,7 +84,7 @@ namespace JonPlayer
                 try { if (File.Exists(srtPath)) File.Delete(srtPath); } catch { }
 
                 Console.WriteLine($"Error during Whisper extraction: {ex.Message}");
-                string errorMsg = ex.Message;
+                string errorMsg = ex.ToString();
                 if (errorMsg.Contains("503"))
                 {
                     errorMsg += " (사내 방화벽/보안 정책으로 모델 다운로드가 차단되었습니다. 수동으로 ggml-small.bin을 다운로드하세요.)";
@@ -113,35 +111,6 @@ namespace JonPlayer
             }
         }
 
-        private static async Task DownloadModel(string fileName, CancellationToken cancellationToken)
-        {
-            var tempPath = fileName + ".tmp";
-            try
-            {
-                var handler = new HttpClientHandler
-                {
-                    UseDefaultCredentials = true,
-                    UseProxy = true
-                    // Removed: ServerCertificateCustomValidationCallback to ensure standard secure TLS validation.
-                    // If enterprise proxy decryption causes issues, users should install the proper root CA.
-                };
-                using var client = new HttpClient(handler);
-                client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                using var stream = await client.GetStreamAsync("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin", cancellationToken);
-                using var fileWriter = File.Create(tempPath);
-                await stream.CopyToAsync(fileWriter, cancellationToken);
-                fileWriter.Close();
-
-                // Atomic replacement: only move if download completed successfully
-                File.Move(tempPath, fileName, true);
-            }
-            catch
-            {
-                // Clean up partial download
-                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
-                throw;
-            }
-        }
 
         private static string FormatTime(TimeSpan time)
         {

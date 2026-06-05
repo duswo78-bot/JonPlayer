@@ -199,9 +199,15 @@
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="OuterRing" Property="Fill" Value="{DynamicResource AccentBrush}"/>
+                                <Setter TargetName="OuterRing" Property="Fill" Value="{DynamicResource ToggleOnBrush}"/>
+                                <Setter TargetName="OuterRing" Property="Effect">
+                                    <Setter.Value>
+                                        <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                    </Setter.Value>
+                                </Setter>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="OuterRing" Property="Fill" Value="{DynamicResource ToggleOnBrush}"/>
                                 <Setter TargetName="KnobSurface" Property="Margin" Value="2"/>
                                 <Setter TargetName="cp" Property="Margin" Value="1,1,0,0"/>
                             </Trigger>
@@ -336,7 +342,6 @@
 
         <Style x:Key="VolumeSlider" TargetType="Slider">
             <Setter Property="Height" Value="45"/>
-            <Setter Property="Width"  Value="90"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -556,7 +561,7 @@
                                 </LinearGradientBrush>
                             </Run.Foreground>
                         </Run></TextBlock>
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="4,1,0,0">
+                    <StackPanel x:Name="AptivLogoPanel" Visibility="Collapsed" Orientation="Horizontal" VerticalAlignment="Center" Margin="4,1,0,0">
                         <TextBlock Text="●" Foreground="#FF4500" FontSize="5" VerticalAlignment="Center" Margin="0,0,3,0"/>
                         <TextBlock Text="A P T I V" Foreground="{DynamicResource TextBrush}" FontSize="13" FontWeight="SemiBold" FontFamily="Montserrat" VerticalAlignment="Center"/>
                         <TextBlock Text="●" Foreground="#FF4500" FontSize="5" VerticalAlignment="Center" Margin="3,0,0,0"/>
@@ -574,10 +579,13 @@
         <Grid x:Name="VideoGrid" Grid.Row="1" Background="Black">
             <!-- Viewbox corrects aspect ratio when video is rotated 90°/270° -->
             <Viewbox x:Name="VideoViewbox" Stretch="Uniform" Visibility="Collapsed">
-                <Image x:Name="VideoElement" Stretch="Uniform">
+                <Image x:Name="VideoElement" Stretch="Uniform" RenderTransformOrigin="0.5,0.5">
                     <Image.LayoutTransform>
                         <RotateTransform x:Name="VideoRotation" Angle="0"/>
                     </Image.LayoutTransform>
+                    <Image.RenderTransform>
+                        <ScaleTransform x:Name="VideoScale" ScaleX="1" ScaleY="1" />
+                    </Image.RenderTransform>
                 </Image>
             </Viewbox>
             <Image x:Name="ImgSplash" Stretch="None" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
@@ -956,6 +964,7 @@
                                             </StackPanel>
                                         </StackPanel>
                                         <TextBlock Text="Keyboard Shortcuts" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" FontSize="13" VerticalAlignment="Center"/>
+                                        <ToggleButton x:Name="BtnToggleMediaShortcuts" Content="Media Filters ▶" Foreground="{DynamicResource TextMutedBrush}" Background="Transparent" BorderThickness="0" Margin="10,0,0,0" FontSize="11" Click="BtnToggleMediaShortcuts_Click" Cursor="Hand" />
                                     </StackPanel>
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                                         <Button Width="26" Height="26" ToolTip="Close Shortcuts" Click="BtnShortcutsClose_Click" Cursor="Hand" Focusable="False"
@@ -995,7 +1004,8 @@
                                     <Style TargetType="ScrollBar" BasedOn="{StaticResource ThinScrollBarStyle}"/>
                                 </ScrollViewer.Resources>
                                 <StackPanel Orientation="Vertical">
-                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <StackPanel x:Name="BasicShortcutsPanel" Orientation="Vertical">
+                                        <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="F1" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="단축키 안내 보기/숨기기 (Show / Hide Shortcuts)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
@@ -1070,7 +1080,7 @@
                                     <!-- 자막 관련 추가 단축키 -->
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="W" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="Shift+W" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                             <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="A" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                             <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="S" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                             <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="D" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
@@ -1095,12 +1105,56 @@
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="C" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
-                                        <TextBlock Grid.Column="1" Text="화면 캡처 (Screenshot to Downloads)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        <TextBlock Grid.Column="1" Text="현재 화면 캡처 (Capture Frame)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+W" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         <TextBlock Grid.Column="1" Text="파일 닫기 (Close File)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Ctrl+U" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="네트워크 스트리밍 (Open URL)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="P" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                        <TextBlock Grid.Column="1" Text="PIP 모드 (Picture-in-Picture)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                    </Grid>
+                                    </StackPanel>
+
+                                    <!-- Media Filter Shortcuts (Hidden by default) -->
+                                    <StackPanel x:Name="MediaShortcutsPanel" Orientation="Vertical" Visibility="Collapsed" Margin="0,10,0,0">
+                                        <Border Height="1" Background="#30FFFFFF" Margin="0,0,0,10"/>
+                                        <TextBlock Text="미디어 필터 단축키 (Media Filters)" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                                        
+                                        <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="H" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <TextBlock Grid.Column="1" Text="HLSL 셰이더 비디오 필터" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </Grid>
+                                        <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                                <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="Ctrl+M" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                                <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="Ctrl+V" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="좌우 / 상하 반전 (Flip)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </Grid>
+                                        
+                                        <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Shift+B" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <TextBlock Grid.Column="1" Text="베이스 부스트 (Bass Boost)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </Grid>
+                                        <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Shift+V" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <TextBlock Grid.Column="1" Text="보컬 부스트 (Vocal Boost)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </Grid>
+                                        <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Shift+O" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <TextBlock Grid.Column="1" Text="볼륨 오버드라이브 (Overdrive)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </Grid>
+                                        <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="Shift+R" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <TextBlock Grid.Column="1" Text="소리 필터 초기화" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </Grid>
+                                    </StackPanel>
                                 </StackPanel>
                             </ScrollViewer>
                         </Grid>
@@ -1149,7 +1203,7 @@
                 </Border>
             </Popup>
 
-            <Grid x:Name="FsBottomStrip" HorizontalAlignment="Stretch" MaxWidth="960" MinWidth="750" VerticalAlignment="Bottom" Margin="0,0,0,20" MouseEnter="FsBottomStrip_MouseEnter" MouseLeave="FsBottomStrip_MouseLeave" Visibility="Collapsed">
+            <Grid x:Name="FsBottomStrip" HorizontalAlignment="Stretch" MaxWidth="1060" MinWidth="520" VerticalAlignment="Bottom" Margin="0,0,0,20" MouseEnter="FsBottomStrip_MouseEnter" MouseLeave="FsBottomStrip_MouseLeave" Visibility="Collapsed">
                 <Border Background="{DynamicResource PanelBrush}" CornerRadius="16" Opacity="0.7"/>
                 <Border BorderBrush="{DynamicResource DividerBrush}" BorderThickness="1" CornerRadius="16" Padding="24,12">
                     <StackPanel Orientation="Vertical">
@@ -1164,9 +1218,18 @@
                         <TextBlock x:Name="TxtTotalTimeFS" Grid.Column="2" Text="00:00:00" Foreground="{DynamicResource TextMutedBrush}" FontSize="13" FontWeight="SemiBold" FontFamily="Consolas" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </Grid>
                     <Grid>
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1*" MinWidth="280" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="1*" MinWidth="230" />
+                        </Grid.ColumnDefinitions>
+                        
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
                             <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
                                 <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                            </Button>
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Open URL (Ctrl+U)" Click="BtnOpenUrl_Click" Margin="0,0,8,0">
+                                <TextBlock Text="🌐" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" FontSize="14" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,-2,0,0"/>
                             </Button>
                             <Button x:Name="BtnPlaylistToggleFS" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False" Margin="0,0,8,0">
                                 <Path Data="{StaticResource PlaylistIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="16" Height="16" Stretch="Uniform"/>
@@ -1197,7 +1260,8 @@
                             </Button>
                             <TextBlock x:Name="TxtWhisperProgressFS" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                         </StackPanel>
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                        
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
                                 <Path Data="{StaticResource PrevIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
@@ -1217,32 +1281,68 @@
                                 <Path Data="{StaticResource NextIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
                         </StackPanel>
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                            <Button x:Name="BtnMuteFS" Style="{StaticResource KnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
+                        
+                        <Grid Grid.Column="2" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="1000*" MaxWidth="90" MinWidth="10" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            
+                            <Button Grid.Column="1" x:Name="BtnMuteFS" Style="{StaticResource KnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
                                 <Path x:Name="MuteIconPathFS" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Slider x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                            <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,12,0">
-                                <Button.ContextMenu>
-                                    <ContextMenu x:Name="MenuSpeedFS">
-                                        <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
-                                        <MenuItem Header="0.5x"  Tag="0.5"  Click="MenuItemSpeed_Click"/>
-                                        <MenuItem Header="0.75x" Tag="0.75" Click="MenuItemSpeed_Click"/>
-                                        <MenuItem Header="1.0x"  Tag="1.0"  Click="MenuItemSpeed_Click"/>
-                                        <MenuItem Header="1.25x" Tag="1.25" Click="MenuItemSpeed_Click"/>
-                                        <MenuItem Header="1.5x"  Tag="1.5"  Click="MenuItemSpeed_Click"/>
-                                        <MenuItem Header="2.0x"  Tag="2.0"  Click="MenuItemSpeed_Click"/>
-                                    </ContextMenu>
-                                </Button.ContextMenu>
-                            </Button>
-                            <Button x:Name="BtnThemeFS" Style="{StaticResource KnobButton}" ToolTip="Toggle Theme" Click="BtnTheme_Click" Margin="0,0,5,0">
-                                <Path x:Name="ThemeIconPathFS" Data="{StaticResource MoonIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                            </Button>
-                            <Button Style="{StaticResource KnobButton}" ToolTip="Exit Fullscreen (Esc)" Click="BtnExitFullscreen_Click">
-                                <Path Data="{StaticResource ExitFullscreenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                            </Button>
-                        </StackPanel>
-                    </Grid>
+                            <Slider Grid.Column="2" x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            
+                            <StackPanel Grid.Column="3" Orientation="Horizontal">
+                                <Button x:Name="BtnBassFS" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center" Tag="On">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                </Trigger>
+                                                <Trigger Property="Tag" Value="On">
+                                                    <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
+                                                    <Setter Property="Effect">
+                                                        <Setter.Value>
+                                                            <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                        </Setter.Value>
+                                                    </Setter>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+                                <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
+                                    <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1"/>
+                                    <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,0,0">
+                                        <Button.ContextMenu>
+                                            <ContextMenu x:Name="MenuSpeedFS">
+                                                <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
+                                                <MenuItem Header="0.5x"  Tag="0.5"  Click="MenuItemSpeed_Click"/>
+                                                <MenuItem Header="0.75x" Tag="0.75" Click="MenuItemSpeed_Click"/>
+                                                <MenuItem Header="1.0x"  Tag="1.0"  Click="MenuItemSpeed_Click"/>
+                                                <MenuItem Header="1.25x" Tag="1.25" Click="MenuItemSpeed_Click"/>
+                                                <MenuItem Header="1.5x"  Tag="1.5"  Click="MenuItemSpeed_Click"/>
+                                                <MenuItem Header="2.0x"  Tag="2.0"  Click="MenuItemSpeed_Click"/>
+                                            </ContextMenu>
+                                        </Button.ContextMenu>
+                                    </Button>
+                                </StackPanel>
+                                <Button x:Name="BtnThemeFS" Style="{StaticResource KnobButton}" ToolTip="Toggle Theme" Click="BtnTheme_Click" Margin="0,0,5,0">
+                                    <Path x:Name="ThemeIconPathFS" Data="{StaticResource MoonIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                                </Button>
+                                <Button Style="{StaticResource KnobButton}" ToolTip="Exit Fullscreen (Esc)" Click="BtnExitFullscreen_Click">
+                                    <Path Data="{StaticResource ExitFullscreenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                </Grid>
                 </StackPanel>
             </Border>
         </Grid>
@@ -1261,89 +1361,139 @@
             </Grid>
         </Border>
 
-        <Border Grid.Row="3" x:Name="ControlBar" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="0,1,0,0" Padding="14,8">
-            <Grid>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
-                        <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                    <Button x:Name="BtnPlaylistToggle" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False" Margin="0,0,8,0">
-                        <Path Data="{StaticResource PlaylistIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="16" Height="16" Stretch="Uniform"/>
-                    </Button>
-                    <Button x:Name="BtnRepeat" Style="{StaticResource TextToggleButton}" Content="REPEAT" Click="BtnRepeat_Click" Margin="0,0,8,0" ToolTip="Repeat Playlist"/>
-                    <Button x:Name="BtnShuffle" Style="{StaticResource TextToggleButton}" Content="SHUFFLE" Click="BtnShuffle_Click" Margin="0,0,8,0" ToolTip="Shuffle Playlist"/>
-                    <Button x:Name="BtnWhisper" Style="{StaticResource TextToggleButton}" Content="CC+" Click="BtnWhisper_Click" Margin="4,0,8,0" ToolTip="Auto Generate Subtitle (Whisper)" Height="20" VerticalAlignment="Center">
-                        <Button.Template>
-                            <ControlTemplate TargetType="Button">
-                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
-                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
-                                </Border>
-                                <ControlTemplate.Triggers>
-                                    <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
-                                    </Trigger>
-                                    <Trigger Property="Tag" Value="On">
-                                        <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
-                                        <Setter Property="Effect">
-                                            <Setter.Value>
-                                                <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
-                                            </Setter.Value>
-                                        </Setter>
-                                    </Trigger>
-                                </ControlTemplate.Triggers>
-                            </ControlTemplate>
-                        </Button.Template>
-                    </Button>
-                    <TextBlock x:Name="TxtWhisperProgress" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
-                </StackPanel>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
-                        <Path Data="{StaticResource PrevIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Rewind 10s (←)" Click="BtnSkipBack_Click" Margin="0,0,6,0">
-                        <Path Data="{StaticResource RewindIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                    <Button x:Name="BtnPlayPause" Style="{StaticResource KnobButton}" Width="44" Height="44" ToolTip="Play/Pause (Space)" Click="BtnPlayPause_Click" Margin="0,0,6,0">
-                        <Path x:Name="PlayPauseIconPath" Data="{StaticResource PlayIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform"/>
-                    </Button>
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Stop" Click="BtnStop_Click" Margin="0,0,6,0">
-                        <Path Data="{StaticResource StopIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Forward 10s (→)" Click="BtnSkipForward_Click" Margin="0,0,6,0">
-                        <Path Data="{StaticResource ForwardIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Next" Click="BtnNext_Click">
-                        <Path Data="{StaticResource NextIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                </StackPanel>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button x:Name="BtnMute" Style="{StaticResource KnobButton}" ToolTip="Mute/Unmute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
-                        <Path x:Name="MuteIconPath" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                    <Slider x:Name="SliderVolume" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,14,0"/>
-                    <Border Width="1" Height="20" Background="{DynamicResource DividerBrush}" Margin="0,0,14,0"/>
-                    <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <Button x:Name="BtnSpeed" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Playback Speed" Click="BtnSpeed_Click" Margin="0,0,12,0">
-                        <Button.ContextMenu>
-                            <ContextMenu x:Name="MenuSpeed">
-                                <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
-                                <MenuItem Header="0.5x"  Tag="0.5"  Click="MenuItemSpeed_Click"/>
-                                <MenuItem Header="0.75x" Tag="0.75" Click="MenuItemSpeed_Click"/>
-                                <MenuItem Header="1.0x"  Tag="1.0"  Click="MenuItemSpeed_Click"/>
-                                <MenuItem Header="1.25x" Tag="1.25" Click="MenuItemSpeed_Click"/>
-                                <MenuItem Header="1.5x"  Tag="1.5"  Click="MenuItemSpeed_Click"/>
-                                <MenuItem Header="2.0x"  Tag="2.0"  Click="MenuItemSpeed_Click"/>
-                            </ContextMenu>
-                        </Button.ContextMenu>
-                    </Button>
-                    <Button x:Name="BtnTheme" Style="{StaticResource KnobButton}" ToolTip="Toggle Theme" Click="BtnTheme_Click" Margin="0,0,5,0">
-                        <Path x:Name="ThemeIconPath" Data="{StaticResource MoonIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                    <Button Style="{StaticResource KnobButton}" ToolTip="Fullscreen (F11)" Click="BtnFullscreen_Click">
-                        <Path Data="{StaticResource FullscreenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
-                    </Button>
-                </StackPanel>
-            </Grid>
+        <Border Grid.Row="3" x:Name="ControlBar" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="0,1,0,0" Padding="0">
+            <Viewbox Stretch="Uniform" StretchDirection="DownOnly" HorizontalAlignment="Stretch">
+                <Grid Width="{Binding ActualWidth, ElementName=ControlBar}" MinWidth="800">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="1*" MinWidth="280" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="1*" MinWidth="250" />
+                    </Grid.ColumnDefinitions>
+                    
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="14,8,0,8">
+                        <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
+                            <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                        </Button>
+                        <Button Style="{StaticResource KnobButton}" ToolTip="Open URL (Ctrl+U)" Click="BtnOpenUrl_Click" Margin="0,0,8,0">
+                            <TextBlock Text="🌐" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" FontSize="14" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,-2,0,0"/>
+                        </Button>
+                        <Button x:Name="BtnPlaylistToggle" Style="{StaticResource KnobButton}" ToolTip="Playlist (F9)" Click="BtnPlaylistToggle_Click" IsEnabled="False" Margin="0,0,8,0">
+                            <Path Data="{StaticResource PlaylistIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="16" Height="16" Stretch="Uniform"/>
+                        </Button>
+                        <Button x:Name="BtnRepeat" Style="{StaticResource TextToggleButton}" Content="REPEAT" Click="BtnRepeat_Click" Margin="0,0,8,0" ToolTip="Repeat Playlist"/>
+                        <Button x:Name="BtnShuffle" Style="{StaticResource TextToggleButton}" Content="SHUFFLE" Click="BtnShuffle_Click" Margin="0,0,8,0" ToolTip="Shuffle Playlist"/>
+                        <Button x:Name="BtnWhisper" Style="{StaticResource TextToggleButton}" Content="CC+" Click="BtnWhisper_Click" Margin="4,0,8,0" ToolTip="Auto Generate Subtitle (Whisper)" Height="20" VerticalAlignment="Center">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                        </Trigger>
+                                        <Trigger Property="Tag" Value="On">
+                                            <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
+                                            <Setter Property="Effect">
+                                                <Setter.Value>
+                                                    <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                </Setter.Value>
+                                            </Setter>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                        <TextBlock x:Name="TxtWhisperProgress" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
+                    </StackPanel>
+                    
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,8">
+                        <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
+                            <Path Data="{StaticResource PrevIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                        </Button>
+                        <Button Style="{StaticResource KnobButton}" ToolTip="Rewind 10s (←)" Click="BtnSkipBack_Click" Margin="0,0,6,0">
+                            <Path Data="{StaticResource RewindIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                        </Button>
+                        <Button x:Name="BtnPlayPause" Style="{StaticResource KnobButton}" Width="44" Height="44" ToolTip="Play/Pause (Space)" Click="BtnPlayPause_Click" Margin="0,0,6,0">
+                            <Path x:Name="PlayPauseIconPath" Data="{StaticResource PlayIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform"/>
+                        </Button>
+                        <Button Style="{StaticResource KnobButton}" ToolTip="Stop" Click="BtnStop_Click" Margin="0,0,6,0">
+                            <Path Data="{StaticResource StopIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                        </Button>
+                        <Button Style="{StaticResource KnobButton}" ToolTip="Forward 10s (→)" Click="BtnSkipForward_Click" Margin="0,0,6,0">
+                            <Path Data="{StaticResource ForwardIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                        </Button>
+                        <Button Style="{StaticResource KnobButton}" ToolTip="Next" Click="BtnNext_Click">
+                            <Path Data="{StaticResource NextIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                        </Button>
+                    </StackPanel>
+                    
+                    <Grid Grid.Column="2" HorizontalAlignment="Stretch" VerticalAlignment="Center" Margin="0,8,14,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="1000*" MaxWidth="90" MinWidth="10" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        
+                        <Button Grid.Column="1" x:Name="BtnMute" Style="{StaticResource KnobButton}" ToolTip="Mute/Unmute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
+                            <Path x:Name="MuteIconPath" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                        </Button>
+                        <Slider Grid.Column="2" x:Name="SliderVolume" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                        
+                        <StackPanel Grid.Column="3" Orientation="Horizontal">
+                            <Border Width="1" Height="20" Background="{DynamicResource DividerBrush}" Margin="0,0,14,0"/>
+                            <Button x:Name="BtnBass" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center" Tag="On">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                            </Trigger>
+                                            <Trigger Property="Tag" Value="On">
+                                                <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
+                                                <Setter Property="Effect">
+                                                    <Setter.Value>
+                                                        <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                            <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
+                                <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1"/>
+                                <Button x:Name="BtnSpeed" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Playback Speed" Click="BtnSpeed_Click" Margin="0,0,0,0">
+                                    <Button.ContextMenu>
+                                        <ContextMenu x:Name="MenuSpeed">
+                                            <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
+                                            <MenuItem Header="0.5x"  Tag="0.5"  Click="MenuItemSpeed_Click"/>
+                                            <MenuItem Header="0.75x" Tag="0.75" Click="MenuItemSpeed_Click"/>
+                                            <MenuItem Header="1.0x"  Tag="1.0"  Click="MenuItemSpeed_Click"/>
+                                            <MenuItem Header="1.25x" Tag="1.25" Click="MenuItemSpeed_Click"/>
+                                            <MenuItem Header="1.5x"  Tag="1.5"  Click="MenuItemSpeed_Click"/>
+                                            <MenuItem Header="2.0x"  Tag="2.0"  Click="MenuItemSpeed_Click"/>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                </Button>
+                            </StackPanel>
+                            <Button x:Name="BtnTheme" Style="{StaticResource KnobButton}" ToolTip="Toggle Theme" Click="BtnTheme_Click" Margin="0,0,5,0">
+                                <Path x:Name="ThemeIconPath" Data="{StaticResource MoonIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                            </Button>
+                            <Button x:Name="BtnPip" Style="{StaticResource KnobButton}" ToolTip="PIP Mode (P)" Click="BtnPip_Click" Margin="0,0,5,0">
+                                <TextBlock Text="⧉" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" FontSize="16" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,-2,0,0"/>
+                            </Button>
+                            <Button Style="{StaticResource KnobButton}" ToolTip="Fullscreen (F11)" Click="BtnFullscreen_Click">
+                                <Path Data="{StaticResource FullscreenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Viewbox>
         </Border>
     </Grid>
 </Window>

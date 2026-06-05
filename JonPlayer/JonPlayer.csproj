@@ -35,6 +35,7 @@
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="SoundTouch.Net" Version="2.3.2" />
     <PackageReference Include="SubtitlesParser" Version="1.5.1" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.8" />
     <PackageReference Include="TagLibSharp" Version="2.3.0" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
@@ -43,6 +44,7 @@
     <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
     <PackageReference Include="Whisper.net" Version="1.9.1" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
+    <PackageReference Include="YoutubeExplode" Version="6.6.0" />
   </ItemGroup>
 
 </Project>
