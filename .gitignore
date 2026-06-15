@@ -23,3 +23,16 @@ bld/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
+
+# Temporary, backup and script files
+*.bak
+*.bak*
+*..cs,bak*
+patch_*.py
+publish_folder/
+scratch/
+backup_pre_dlna/
+scratch_proj/
+JonPlayerEX/
+temp.ts
+transcript_matches.jsonl

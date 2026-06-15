@@ -24,7 +24,9 @@ namespace JonPlayer
                 string modelName = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ggml-small.bin");
                 if (!File.Exists(modelName))
                 {
-                    throw new FileNotFoundException($"자막 모델 파일을 찾을 수 없습니다. ({modelName}) 설치 시 자막 구성 요소를 포함했는지 확인해 주세요.");
+                    onProgress("🪄 AI 가사 모델 다운로드 중...", 30);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await DownloadModel(modelName);
                 }
 
                 // 3. Process with Whisper
@@ -108,6 +110,36 @@ namespace JonPlayer
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 writer.Write(buffer, 0, bytesRead);
+            }
+        }
+
+        private static async Task DownloadModel(string fileName)
+        {
+            var handler = new HttpClientHandler
+            {
+                UseDefaultCredentials = true,
+                UseProxy = true,
+                ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => { return true; }
+            };
+            using var client = new HttpClient(handler);
+            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+            using var stream = await client.GetStreamAsync("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin");
+            
+            string tempPath = fileName + ".tmp";
+            try
+            {
+                using var fileWriter = File.Create(tempPath);
+                await stream.CopyToAsync(fileWriter);
+                fileWriter.Close();
+
+                // Atomic replacement: only move if download completed successfully
+                File.Move(tempPath, fileName, true);
+            }
+            catch
+            {
+                // Clean up partial download
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                throw;
             }
         }
 

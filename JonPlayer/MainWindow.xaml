@@ -480,7 +480,7 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="Transparent" Padding="4,2">
+                        <Border x:Name="bd" Background="Transparent" Padding="4,2">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -494,6 +494,12 @@
                                         <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
                                     </Setter.Value>
                                 </Setter>
+                            </Trigger>
+                            <Trigger Property="Tag" Value="StreamOn">
+                                <Setter Property="Foreground" Value="#1DB954"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#1DB954"/>
+                                <Setter TargetName="bd" Property="BorderThickness" Value="1"/>
+                                <Setter TargetName="bd" Property="CornerRadius" Value="3"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -589,6 +595,7 @@
                 </Image>
             </Viewbox>
             <Image x:Name="ImgSplash" Stretch="None" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+            <Image x:Name="ImgYoutubeThumbnail" Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed"/>
 
             <Grid x:Name="AudioUI" Visibility="Collapsed">
                 <Image x:Name="AudioCoverBackground" Stretch="UniformToFill">
@@ -1254,6 +1261,14 @@
                                                     </Setter.Value>
                                                 </Setter>
                                             </Trigger>
+                                            <Trigger Property="Tag" Value="StreamOn">
+                                                <Setter Property="Foreground" Value="#1DB954"/>
+                                                <Setter Property="Effect">
+                                                    <Setter.Value>
+                                                        <DropShadowEffect Color="#1DB954" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Trigger>
                                         </ControlTemplate.Triggers>
                                     </ControlTemplate>
                                 </Button.Template>
@@ -1319,11 +1334,10 @@
                                     </Button.Template>
                                 </Button>
                                 <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
-                                    <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1"/>
+                                    <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1" Cursor="Hand" MouseLeftButtonUp="SpeedLabel_MouseLeftButtonUp"/>
                                     <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,0,0">
                                         <Button.ContextMenu>
                                             <ContextMenu x:Name="MenuSpeedFS">
-                                                <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
                                                 <MenuItem Header="0.5x"  Tag="0.5"  Click="MenuItemSpeed_Click"/>
                                                 <MenuItem Header="0.75x" Tag="0.75" Click="MenuItemSpeed_Click"/>
                                                 <MenuItem Header="1.0x"  Tag="1.0"  Click="MenuItemSpeed_Click"/>
@@ -1400,6 +1414,14 @@
                                                 </Setter.Value>
                                             </Setter>
                                         </Trigger>
+                                        <Trigger Property="Tag" Value="StreamOn">
+                                            <Setter Property="Foreground" Value="#1DB954"/>
+                                            <Setter Property="Effect">
+                                                <Setter.Value>
+                                                    <DropShadowEffect Color="#1DB954" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                </Setter.Value>
+                                            </Setter>
+                                        </Trigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
                             </Button.Template>
@@ -1466,11 +1488,10 @@
                                 </Button.Template>
                             </Button>
                             <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
-                                <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1"/>
+                                <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1" Cursor="Hand" MouseLeftButtonUp="SpeedLabel_MouseLeftButtonUp"/>
                                 <Button x:Name="BtnSpeed" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Playback Speed" Click="BtnSpeed_Click" Margin="0,0,0,0">
                                     <Button.ContextMenu>
                                         <ContextMenu x:Name="MenuSpeed">
-                                            <MenuItem Header="0.25x" Tag="0.25" Click="MenuItemSpeed_Click"/>
                                             <MenuItem Header="0.5x"  Tag="0.5"  Click="MenuItemSpeed_Click"/>
                                             <MenuItem Header="0.75x" Tag="0.75" Click="MenuItemSpeed_Click"/>
                                             <MenuItem Header="1.0x"  Tag="1.0"  Click="MenuItemSpeed_Click"/>

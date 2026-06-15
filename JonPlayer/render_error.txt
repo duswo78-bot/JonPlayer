@@ -1,5 +1,0 @@
-Zero-copy render failed: SharpGen.Runtime.SharpGenException: HRESULT: [0x80070057], Module: [General], ApiCode: [E_INVALIDARG/Invalid arguments], Message: [매개 변수가 틀립니다.
-]
-   at SharpGen.Runtime.Result.ThrowFailureException()
-   at Vortice.Direct3D11.ID3D11Device.CreateShaderResourceView(ID3D11Resource resource, Nullable`1 desc)
-   at JonPlayer.D3D11VideoRenderer.RenderHardwareTexture(IntPtr texturePtr, Int32 sliceIndex) in C:\Users\djw7ql\OneDrive - Aptiv\Antigravity\JonPlayer\JonPlayer\D3D11VideoRenderer.cs:line 373

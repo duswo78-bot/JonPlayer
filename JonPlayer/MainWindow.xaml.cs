@@ -94,6 +94,11 @@ namespace JonPlayer
         private bool _isUserDraggingSlider;
         private bool _isUpdatingFromPlayer;
         private bool _isSeeking;
+        private int _streamingSeekGeneration;
+        private int _openGeneration;
+        private bool _isClosing;
+        private long _lastFrameTicks;
+        private long _lastAudioTicks;
 
         private int   _lastVolume    = 80;
         private bool  _isMuted;
@@ -123,6 +128,24 @@ namespace JonPlayer
 
         private bool _isMouseOverFsStrip;
         private bool _isMouseOverFsExitBadge;
+
+        private static bool IsStreamingPath(string? path)
+        {
+            return !string.IsNullOrEmpty(path) &&
+                   (path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                    path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                    path.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase) ||
+                    path.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool IsAdaptiveStreamingPath(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            return path.Contains(".mpd", StringComparison.OrdinalIgnoreCase) ||
+                   path.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+                   path.Contains("/manifest", StringComparison.OrdinalIgnoreCase) ||
+                   path.Contains("manifest(", StringComparison.OrdinalIgnoreCase);
+        }
 
 
         [DllImport("winmm.dll")]
@@ -314,6 +337,12 @@ namespace JonPlayer
             this.SizeChanged += MainWindow_SizeChanged;
 
             Closing += (s, e) => {
+                _isClosing = true;
+                Interlocked.Increment(ref _openGeneration);
+                Interlocked.Increment(ref _streamingSeekGeneration);
+                _isOpeningFile = false;
+                _isSeeking = false;
+
                 // Stop all timers first to prevent null reference after disposal
                 _fsMousePollTimer.Stop();
                 _statsTimer.Stop();
@@ -324,6 +353,7 @@ namespace JonPlayer
                 _playlistTimer?.Stop();
 
                 CancelWhisperExtraction();
+                StopStreamingLoadingBlink();
                 if (_decoder != null)
                 {
                     DetachDecoderEvents(_decoder);
@@ -341,6 +371,7 @@ namespace JonPlayer
 
         private void Decoder_FrameDecoded(IntPtr bgraData, int width, int height, int stride, bool isHardwareTexture)
         {
+            Volatile.Write(ref _lastFrameTicks, DateTime.UtcNow.Ticks);
             _renderTimer.Restart();
             _renderer?.ResetSize(width, height);
             _renderer?.RenderFrame(bgraData, width, height, stride, isHardwareTexture);
@@ -367,7 +398,7 @@ namespace JonPlayer
                 SliderTimeline.Value = ratio * SliderTimeline.Maximum;
                 if (SliderTimelineFS != null) SliderTimelineFS.Value = SliderTimeline.Value;
                 _isUpdatingFromPlayer = false;
-            }));
+            }), DispatcherPriority.Background);
         }
 
         private DateTime _lastTimeUpdate = DateTime.MinValue;
@@ -445,7 +476,7 @@ namespace JonPlayer
                 {
                     if (NextVideoOverlay != null) NextVideoOverlay.Visibility = Visibility.Collapsed;
                 }
-            }));
+            }), DispatcherPriority.Background);
         }
 
         private void Window_StateChanged(object? sender, EventArgs e)
@@ -698,6 +729,8 @@ namespace JonPlayer
         {
             public string Name { get; set; } = string.Empty;
             public string Path { get; set; } = string.Empty;
+            public string? AudioPath { get; set; }
+            public string? YoutubeUrl { get; set; }
 
             private bool _isCurrentlyPlaying;
             public bool IsCurrentlyPlaying
@@ -761,6 +794,11 @@ namespace JonPlayer
                 var url = dlg.InputUrl;
                 if (!string.IsNullOrEmpty(url))
                 {
+                    if (IsStreamingPath(url))
+                    {
+                        TxtNowPlaying.Text = $"Loading... {url}";
+                        StartStreamingLoadingBlink();
+                    }
                     LoadPlaylist(new[] { url });
                 }
             }
@@ -806,6 +844,8 @@ namespace JonPlayer
 
         private async void LoadPlaylist(string[] files)
         {
+            if (_isClosing) return;
+
             _playlist.Clear();
             _playedIndices.Clear();
             
@@ -819,7 +859,11 @@ namespace JonPlayer
 
             foreach (var f in files) 
             {
+                if (_isClosing) return;
+
                 string path = f;
+                string? audioPath = null;
+                string? youtubeUrl = null;
                 bool isYoutube = f.Contains("youtube.com") || f.Contains("youtu.be");
                 string title = isYoutube ? f : System.IO.Path.GetFileName(f);
 
@@ -828,16 +872,27 @@ namespace JonPlayer
                     try
                     {
                         var video = await youtube.Videos.GetAsync(f);
+                        if (_isClosing) return;
                         title = video.Title;
-                        var streamManifest = await youtube.Videos.Streams.GetManifestAsync(f);
-                        var muxedStreams = streamManifest.GetMuxedStreams();
-                        var streamInfo = muxedStreams.GetWithHighestVideoQuality();
-                        if (streamInfo != null)
+                        var streamUrl = await _streamingService.GetStreamUrlAsync(f);
+                        if (_isClosing) return;
+                        if (streamUrl != null)
                         {
-                            path = streamInfo.Url;
+                            path = streamUrl;
+                            audioPath = _streamingService.LastAudioUrl;
+                            youtubeUrl = f;
+                        }
+                        else
+                        {
+                            System.Windows.MessageBox.Show("해당 스트리밍 영상의 스트리밍 주소를 가져올 수 없습니다.\n(제한된 영상이거나 정책 변경으로 인해 차단되었을 수 있습니다.)", "스트리밍 오류", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+                            continue;
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        System.Windows.MessageBox.Show($"스트리밍 영상을 불러오는데 실패했습니다:\n{ex.Message}", "스트리밍 오류", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+                        continue;
+                    }
                 }
 
                 bool isUrl = path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || 
@@ -846,13 +901,15 @@ namespace JonPlayer
                              path.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase);
 
                 string ext = System.IO.Path.GetExtension(f);
-                if (isUrl || isYoutube || allowedExts.Contains(ext))
+                if (isUrl || allowedExts.Contains(ext))
                 {
-                    _playlist.Add(new PlaylistItem { Name = isUrl && !isYoutube ? f : title, Path = path });
+                    _playlist.Add(new PlaylistItem { Name = isUrl && !isYoutube ? f : title, Path = path, AudioPath = audioPath, YoutubeUrl = youtubeUrl });
                 }
             }
 
             ListPlaylist.ItemsSource = _playlist;
+
+            if (_isClosing) return;
 
             if (_playlist.Count > 0)
             {
@@ -866,6 +923,10 @@ namespace JonPlayer
                     BtnPlaylistToggleFS.IsEnabled = true;
                     ShowPlaylistBriefly();
                 }
+            }
+            else
+            {
+                StopStreamingLoadingBlink();
             }
 
             if (TxtPlaylistCount != null)
@@ -1161,8 +1222,9 @@ namespace JonPlayer
         }
 
         private string? _currentFilePath;
-
         private bool _isOpeningFile = false;
+        private YouTubeStreamingService _streamingService = new YouTubeStreamingService();
+        private bool _isYoutubeDownloadInProgress;
 
         private void PlayPrev()
         {
@@ -1255,6 +1317,7 @@ namespace JonPlayer
                 UpdatePlayPauseUI(false);
                 if (!PlayNext())
                 {
+                    StopStreamingLoadingBlink();
                     if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
@@ -1287,7 +1350,7 @@ namespace JonPlayer
                         var oldDec = _decoder;
                         _decoder = null;
                         DetachDecoderEvents(oldDec);
-                        Task.Run(() => { oldDec.Stop(); oldDec.Dispose(); });
+                        DisposeDecoderInBackground(oldDec);
                     }
                 }
             }));
@@ -1306,24 +1369,46 @@ namespace JonPlayer
             decoder.SeekPerformed -= Decoder_SeekPerformed;
         }
 
+        private static void DisposeDecoderInBackground(FFmpegMediaDecoder decoder)
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    decoder.Stop();
+                    decoder.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error("Failed to dispose decoder in background", ex);
+                }
+            });
+        }
+
         private async void PlayFile(string path, double startRatio = 0.0)
         {
-            if (_isOpeningFile) return;
+            if (_isClosing) return;
+
+            bool isUrl = IsStreamingPath(path);
+            string displayName = GetNowPlayingDisplayName(path);
+            int openGeneration = Interlocked.Increment(ref _openGeneration);
+            if (!isUrl || startRatio <= 0.0)
+            {
+                Interlocked.Increment(ref _streamingSeekGeneration);
+            }
             _isOpeningFile = true;
 
             FFmpegMediaDecoder? newDecoder = null;
             try
             {
                 _currentFilePath = path;
-                bool isUrl = path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || 
-                             path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
-                             path.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase) ||
-                             path.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase);
-                if (BtnWhisper != null) BtnWhisper.IsEnabled = !isUrl;
-                if (BtnWhisperFS != null) BtnWhisperFS.IsEnabled = !isUrl;
+                bool canUseCcButton = !isUrl || !string.IsNullOrEmpty(GetCurrentYoutubeUrl(path));
+                if (BtnWhisper != null) BtnWhisper.IsEnabled = canUseCcButton;
+                if (BtnWhisperFS != null) BtnWhisperFS.IsEnabled = canUseCcButton;
                 _openCount++;
 
-                TxtNowPlaying.Text = "Loading...";
+                TxtNowPlaying.Text = isUrl ? $"Loading... {displayName}" : "Loading...";
+                if (isUrl) StartStreamingLoadingBlink();
 
                 var oldDecoder = _decoder;
                 _decoder = null;
@@ -1331,12 +1416,7 @@ namespace JonPlayer
                 if (oldDecoder != null)
                 {
                     DetachDecoderEvents(oldDecoder);
-                    
-                    await Task.Run(() => 
-                    {
-                        oldDecoder.Stop();
-                        oldDecoder.Dispose();
-                    });
+                    DisposeDecoderInBackground(oldDecoder);
                 }
 
                 if (_renderer == null)
@@ -1365,12 +1445,37 @@ namespace JonPlayer
                 newDecoder.SeekInitiated += Decoder_SeekInitiated;
                 newDecoder.SeekPerformed += Decoder_SeekPerformed;
                 newDecoder.GetAudioBufferedDurationMs = () => _waveProvider?.BufferedDuration.TotalMilliseconds ?? 0;
+                newDecoder.GetAudioHardwareLatencyMs = () => _waveOut?.DesiredLatency ?? 0;
 
                 Dispatcher.Invoke(() => {
                     if (VideoRotation != null) VideoRotation.Angle = 0;
                 });
 
-                await Task.Run(() => newDecoder.Open(path));
+                // YouTube adaptive: 별도 오디오 URL이 있으면 함께 전달
+                string? separateAudioUrl = null;
+                if (_playlistIndex >= 0 && _playlistIndex < _playlist.Count && _playlist[_playlistIndex].Path == path)
+                {
+                    separateAudioUrl = _playlist[_playlistIndex].AudioPath;
+                }
+                if (separateAudioUrl == null && isUrl)
+                {
+                    separateAudioUrl = _streamingService?.LastAudioUrl;
+                }
+                await Task.Run(() => newDecoder.Open(path, separateAudioUrl, isUrl ? startRatio : 0.0));
+
+                if (_isClosing)
+                {
+                    DetachDecoderEvents(newDecoder);
+                    newDecoder.Dispose();
+                    return;
+                }
+
+                if (openGeneration != Volatile.Read(ref _openGeneration))
+                {
+                    DetachDecoderEvents(newDecoder);
+                    newDecoder.Dispose();
+                    return;
+                }
                 
                 _decoder = newDecoder;
                 InitAudioPlayer();
@@ -1386,7 +1491,7 @@ namespace JonPlayer
                 _decoder.Play();
                 _waveOut?.Play();
                 
-                if (startRatio > 0.0)
+                if (startRatio > 0.0 && !isUrl)
                 {
                     _decoder.Seek(startRatio);
                 }
@@ -1416,42 +1521,40 @@ namespace JonPlayer
                     if (BtnWhisper != null) BtnWhisper.Tag = null;
                     if (BtnWhisperFS != null) BtnWhisperFS.Tag = null;
 
-                    string[] subExts = { ".srt", ".smi", ".vtt" };
-                    string baseDir = Path.GetDirectoryName(path) ?? "";
-                    string baseName = Path.GetFileNameWithoutExtension(path);
-                    
-                    foreach (var ext in subExts)
+                    string? currentYoutubeUrl = GetCurrentYoutubeUrl(path);
+                    if (!string.IsNullOrEmpty(currentYoutubeUrl))
                     {
-                        string subPath = Path.Combine(baseDir, baseName + ext);
-                        if (File.Exists(subPath))
+                        _ = LoadStreamingSubtitlesAsync(currentYoutubeUrl, path, false);
+                    }
+                    else
+                    {
+                        string[] subExts = { ".srt", ".smi", ".vtt" };
+                        string baseDir = Path.GetDirectoryName(path) ?? "";
+                        string baseName = Path.GetFileNameWithoutExtension(path);
+                        
+                        foreach (var ext in subExts)
                         {
-                            if (_subtitleManager.LoadSubtitle(subPath))
+                            string subPath = Path.Combine(baseDir, baseName + ext);
+                            if (File.Exists(subPath))
                             {
-                                _subtitlesEnabled = true;
-                                SubtitleBorder.Visibility = Visibility.Visible;
-                                
-                                if (BtnWhisper != null) BtnWhisper.Tag = "On";
-                                if (BtnWhisperFS != null) BtnWhisperFS.Tag = "On";
-
-                                // 3초 블링킹 애니메이션 (Opactiy 0.2 <-> 1.0)
-                                var blinkAnim = new System.Windows.Media.Animation.DoubleAnimation
+                                if (_subtitleManager.LoadSubtitle(subPath))
                                 {
-                                    From = 1.0,
-                                    To = 0.2,
-                                    Duration = new Duration(TimeSpan.FromSeconds(0.5)),
-                                    AutoReverse = true,
-                                    RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(3)
-                                };
-                                if (BtnWhisper != null) BtnWhisper.BeginAnimation(UIElement.OpacityProperty, blinkAnim);
-                                if (BtnWhisperFS != null) BtnWhisperFS.BeginAnimation(UIElement.OpacityProperty, blinkAnim);
+                                    _subtitlesEnabled = true;
+                                    SubtitleBorder.Visibility = Visibility.Visible;
+                                    
+                                    if (BtnWhisper != null) BtnWhisper.Tag = "On";
+                                    if (BtnWhisperFS != null) BtnWhisperFS.Tag = "On";
 
-                                break;
+                                    BlinkSubtitleButtons();
+
+                                    break;
+                                }
                             }
                         }
                     }
                 });
 
-                var name = Path.GetFileName(path);
+                var name = displayName;
                 TxtNowPlaying.Text = name;
                 if (_playlist.Count > 1)
                 {
@@ -1464,12 +1567,14 @@ namespace JonPlayer
 
                 if (_decoder.HasVideo)
                 {
+                    StopStreamingLoadingBlink();
                     if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Visible;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
                 }
                 else
                 {
+                    StopStreamingLoadingBlink();
                     if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Visible;
@@ -1521,28 +1626,78 @@ namespace JonPlayer
             catch (Exception ex)
             {
                 newDecoder?.Dispose();
-                WpfMessageBox.Show($"파일을 열 수 없습니다.\n{ex.Message}", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
+                if (openGeneration == Volatile.Read(ref _openGeneration))
+                {
+                    WpfMessageBox.Show($"파일을 열 수 없습니다.\n{ex.Message}", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
             finally
             {
-                _isOpeningFile = false;
+                if (openGeneration == Volatile.Read(ref _openGeneration))
+                {
+                    StopStreamingLoadingBlink();
+                    _isOpeningFile = false;
+                }
             }
         }
 
-        private void BtnPlayPause_Click   (object sender, RoutedEventArgs e) => TogglePlayPause();
-        private async void BtnStop_Click        (object sender, RoutedEventArgs e)
+        private string GetNowPlayingDisplayName(string path)
         {
+            if (_playlistIndex >= 0 && _playlistIndex < _playlist.Count)
+            {
+                var item = _playlist[_playlistIndex];
+                if (string.Equals(item.Path, path, StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(item.Name))
+                {
+                    return item.Name;
+                }
+            }
+
+            if (IsStreamingPath(path)) return path;
+
+            string fileName = Path.GetFileName(path);
+            return string.IsNullOrWhiteSpace(fileName) ? path : fileName;
+        }
+
+        private void StartStreamingLoadingBlink()
+        {
+            if (ImgSplash == null) return;
+
+            ImgSplash.Visibility = Visibility.Visible;
+            var blink = new DoubleAnimation
+            {
+                From = 0.28,
+                To = 1.0,
+                Duration = TimeSpan.FromSeconds(1.4),
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            };
+            ImgSplash.BeginAnimation(UIElement.OpacityProperty, blink);
+        }
+
+        private void StopStreamingLoadingBlink()
+        {
+            if (ImgSplash == null) return;
+
+            ImgSplash.BeginAnimation(UIElement.OpacityProperty, null);
+            ImgSplash.Opacity = 1.0;
+        }
+
+        private void BtnPlayPause_Click   (object sender, RoutedEventArgs e) => TogglePlayPause();
+        private void BtnStop_Click        (object sender, RoutedEventArgs e)
+        {
+            Interlocked.Increment(ref _openGeneration);
+            Interlocked.Increment(ref _streamingSeekGeneration);
+            _isOpeningFile = false;
+            _isSeeking = false;
+            StopStreamingLoadingBlink();
+
             var oldDecoder = _decoder;
             _decoder = null;
             if (oldDecoder != null)
             {
                 DetachDecoderEvents(oldDecoder);
-                
-                await Task.Run(() => 
-                {
-                    oldDecoder.Stop();
-                    oldDecoder.Dispose();
-                });
+                DisposeDecoderInBackground(oldDecoder);
             }
             
             _waveOut?.Stop();
@@ -1634,6 +1789,7 @@ namespace JonPlayer
 
         private void Decoder_AudioDataAvailable(byte[] buffer, int length)
         {
+            Volatile.Write(ref _lastAudioTicks, DateTime.UtcNow.Ticks);
             if (_waveProvider != null && _waveProvider.BufferedDuration.TotalSeconds < 4.5)
             {
                 _waveProvider.AddSamples(buffer, 0, length);
@@ -1783,6 +1939,8 @@ namespace JonPlayer
             _isUpdatingFromPlayer = false;
 
             _isSeeking = true;
+            if (BeginStreamingSeek(targetRatio)) return;
+
             _decoder.Seek(targetRatio);
             _seekCount++;
         }
@@ -1797,10 +1955,79 @@ namespace JonPlayer
             menu.IsOpen = true;
         }
 
+        private async void SpeedLabel_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            string? youtubeUrl = GetCurrentYoutubeUrl();
+            if (!string.IsNullOrEmpty(youtubeUrl))
+            {
+                await DownloadCurrentYoutubeVideoAsync(youtubeUrl);
+            }
+
+            e.Handled = true;
+        }
+
+        private async Task DownloadCurrentYoutubeVideoAsync(string youtubeUrl)
+        {
+            if (_isYoutubeDownloadInProgress)
+            {
+                ShowToast("스트리밍 다운로드가 이미 진행 중입니다.");
+                return;
+            }
+
+            _isYoutubeDownloadInProgress = true;
+            try
+            {
+                ShowToast("스트리밍 다운로드 정보를 가져옵니다...");
+                var downloadInfo = await _streamingService.GetBestDownloadInfoAsync(youtubeUrl);
+                if (downloadInfo == null)
+                {
+                    ShowToast("다운로드 가능한 스트림이 없습니다.");
+                    return;
+                }
+
+                var dialog = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title = "Save YouTube Video",
+                    FileName = $"{downloadInfo.Title}.{downloadInfo.Extension}",
+                    Filter = $"{downloadInfo.Extension.ToUpperInvariant()} Video|*.{downloadInfo.Extension}|All Files (*.*)|*.*",
+                    InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
+                };
+
+                if (dialog.ShowDialog(this) != true) return;
+
+                DateTime lastProgressToast = DateTime.MinValue;
+                var progress = new Progress<double>(percent =>
+                {
+                    if ((DateTime.UtcNow - lastProgressToast).TotalSeconds >= 1 || percent >= 100.0)
+                    {
+                        lastProgressToast = DateTime.UtcNow;
+                        ShowToast($"스트리밍 다운로드 중.. ({downloadInfo.Quality})");
+                    }
+                });
+
+                ShowToast($"스트리밍 다운로드 시작 ({downloadInfo.Quality})");
+                await _streamingService.DownloadBestVideoAsync(youtubeUrl, dialog.FileName, progress);
+                ShowToast($"스트리밍 다운로드 완료: {Path.GetFileName(dialog.FileName)}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to download YouTube video", ex);
+                ShowToast($"스트리밍 다운로드 실패: {ex.Message}");
+            }
+            finally
+            {
+                _isYoutubeDownloadInProgress = false;
+            }
+        }
+
         private void UpdateSpeedUI(double speed)
         {
             _currentSpeed = speed;
-            if (_decoder != null) _decoder.SetSpeed(speed);
+            if (_decoder != null) 
+            {
+                _decoder.SetSpeed(speed);
+                _waveProvider?.ClearBuffer();
+            }
             
             // Format without trailing .00 if it's an integer, etc.
             string formattedSpeed = (speed % 1 == 0) ? $"{speed:F1}" : $"{speed:F2}";
@@ -1813,6 +2040,7 @@ namespace JonPlayer
 
         private SubtitleManager _subtitleManager = new SubtitleManager();
         private bool _subtitlesEnabled = false;
+        private int _subtitleLoadGeneration;
 
         private void StartRainbowBlink(System.Windows.Controls.TextBlock target)
         {
@@ -1928,6 +2156,99 @@ namespace JonPlayer
 
         private CancellationTokenSource? _whisperCts;
 
+        private string? GetCurrentYoutubeUrl(string? path = null)
+        {
+            if (_playlistIndex >= 0 && _playlistIndex < _playlist.Count)
+            {
+                var item = _playlist[_playlistIndex];
+                if (!string.IsNullOrEmpty(item.YoutubeUrl) &&
+                    (path == null || item.Path == path || _currentFilePath == item.Path))
+                {
+                    return item.YoutubeUrl;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(_currentFilePath) &&
+                (_currentFilePath.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+                 _currentFilePath.Contains("youtu.be", StringComparison.OrdinalIgnoreCase)))
+            {
+                return _currentFilePath;
+            }
+
+            return null;
+        }
+
+        private void BlinkSubtitleButtons()
+        {
+            var blinkAnim = new System.Windows.Media.Animation.DoubleAnimation
+            {
+                From = 1.0,
+                To = 0.2,
+                Duration = new Duration(TimeSpan.FromSeconds(0.5)),
+                AutoReverse = true,
+                RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(3)
+            };
+            if (BtnWhisper != null) BtnWhisper.BeginAnimation(UIElement.OpacityProperty, blinkAnim);
+            if (BtnWhisperFS != null) BtnWhisperFS.BeginAnimation(UIElement.OpacityProperty, blinkAnim);
+        }
+
+        private bool AreSubtitlesOn()
+        {
+            string? tag = BtnWhisper?.Tag?.ToString() ?? BtnWhisperFS?.Tag?.ToString();
+            return _subtitlesEnabled || tag == "On" || tag == "StreamOn";
+        }
+
+        private void TurnSubtitlesOff(string toastMessage)
+        {
+            System.Threading.Interlocked.Increment(ref _subtitleLoadGeneration);
+            CancelWhisperExtraction();
+            _subtitleManager.Clear();
+            _subtitlesEnabled = false;
+            if (TxtSubtitle != null) TxtSubtitle.Text = "";
+            if (SubtitleBorder != null) SubtitleBorder.Visibility = Visibility.Collapsed;
+            if (BtnWhisper != null) BtnWhisper.Tag = null;
+            if (BtnWhisperFS != null) BtnWhisperFS.Tag = null;
+            ShowToast(toastMessage);
+        }
+
+        private async Task<bool> LoadStreamingSubtitlesAsync(string youtubeUrl, string pathSnapshot, bool showToasts)
+        {
+            int loadGeneration = Volatile.Read(ref _subtitleLoadGeneration);
+            try
+            {
+                if (showToasts) ShowToast("스트리밍 자막을 가져옵니다...");
+                _subtitleManager.Clear();
+                await _streamingService.FetchSubtitlesAsync(youtubeUrl, _subtitleManager, CancellationToken.None);
+
+                if (loadGeneration != Volatile.Read(ref _subtitleLoadGeneration)) return false;
+                if (_currentFilePath != pathSnapshot) return false;
+
+                if (!_subtitleManager.HasSubtitles)
+                {
+                    if (BtnWhisper != null) BtnWhisper.Tag = null;
+                    if (BtnWhisperFS != null) BtnWhisperFS.Tag = null;
+                    if (showToasts) ShowToast("사용 가능한 스트리밍 자막이 없습니다.");
+                    return false;
+                }
+
+                _subtitlesEnabled = true;
+                SubtitleBorder.Visibility = Visibility.Visible;
+                if (BtnWhisper != null) BtnWhisper.Tag = "StreamOn";
+                if (BtnWhisperFS != null) BtnWhisperFS.Tag = "StreamOn";
+                BlinkSubtitleButtons();
+                if (showToasts) ShowToast("스트리밍 자막을 켰습니다.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (BtnWhisper != null) BtnWhisper.Tag = null;
+                if (BtnWhisperFS != null) BtnWhisperFS.Tag = null;
+                if (showToasts) ShowToast("스트리밍 자막을 가져오는데 실패했습니다.");
+                Logger.Error("Failed to fetch streaming subtitles", ex);
+                return false;
+            }
+        }
+
         private void CancelWhisperExtraction()
         {
             if (_whisperCts != null)
@@ -1964,14 +2285,20 @@ namespace JonPlayer
             }
 
             // If CC+ is ON, turn it off
-            if (BtnWhisper.Tag?.ToString() == "On")
+            if (AreSubtitlesOn())
             {
-                CancelWhisperExtraction();
-                _subtitlesEnabled = false;
-                SubtitleBorder.Visibility = Visibility.Collapsed;
-                BtnWhisper.Tag = null;
-                if (BtnWhisperFS != null) BtnWhisperFS.Tag = null;
-                ShowToast("자막(Whisper)을 껐습니다.");
+                TurnSubtitlesOff("자막을 껐습니다.");
+                return;
+            }
+
+            string? currentYoutubeUrl = GetCurrentYoutubeUrl();
+            if (!string.IsNullOrEmpty(currentYoutubeUrl))
+            {
+                System.Threading.Interlocked.Increment(ref _subtitleLoadGeneration);
+                _isWhisperAnimatingToCC = true;
+                if (BtnWhisper != null) BtnWhisper.Tag = "StreamOn";
+                if (BtnWhisperFS != null) BtnWhisperFS.Tag = "StreamOn";
+                await LoadStreamingSubtitlesAsync(currentYoutubeUrl, _currentFilePath, true);
                 return;
             }
 
@@ -2214,8 +2541,117 @@ namespace JonPlayer
                 return;
             }
             _isSeeking = true;
-            _decoder.Seek(sliderValue / 1000.0);
+            double targetRatio = sliderValue / 1000.0;
+            if (BeginStreamingSeek(targetRatio)) return;
+
+            _decoder.Seek(targetRatio);
             _seekCount++;
+        }
+
+        private bool BeginStreamingSeek(double targetRatio)
+        {
+            if (string.IsNullOrEmpty(_currentFilePath) || !IsStreamingPath(_currentFilePath)) return false;
+
+            PlaylistItem? item = _playlistIndex >= 0 && _playlistIndex < _playlist.Count ? _playlist[_playlistIndex] : null;
+            bool isYoutube = !string.IsNullOrEmpty(item?.YoutubeUrl);
+            bool isAdaptive = isYoutube ||
+                              !string.IsNullOrEmpty(item?.AudioPath) ||
+                              IsAdaptiveStreamingPath(_currentFilePath) ||
+                              IsAdaptiveStreamingPath(item?.Path) ||
+                              IsAdaptiveStreamingPath(item?.AudioPath);
+
+            if (!isAdaptive) return false;
+            if (_isOpeningFile) return true;
+
+            _seekCount++;
+            _waveProvider?.ClearBuffer();
+
+            double clampedRatio = Math.Clamp(targetRatio, 0.0, 1.0);
+            int seekGeneration = Interlocked.Increment(ref _streamingSeekGeneration);
+
+            if (isYoutube && item != null)
+            {
+                RestartYoutubeStreamAtRatio(item, clampedRatio, seekGeneration);
+            }
+            else
+            {
+                PlayFile(_currentFilePath, clampedRatio);
+            }
+            return true;
+        }
+
+        private async void RestartYoutubeStreamAtRatio(PlaylistItem item, double targetRatio, int seekGeneration)
+        {
+            try
+            {
+                var streamUrl = await _streamingService.GetStreamUrlAsync(item.YoutubeUrl!);
+                if (seekGeneration != Volatile.Read(ref _streamingSeekGeneration)) return;
+
+                if (string.IsNullOrEmpty(streamUrl))
+                {
+                    _isSeeking = false;
+                    WpfMessageBox.Show("스트리밍 주소를 다시 가져올 수 없습니다.", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                item.Path = streamUrl;
+                item.AudioPath = _streamingService.LastAudioUrl;
+                _currentFilePath = streamUrl;
+
+                long watchdogStartTicks = DateTime.UtcNow.Ticks;
+                bool isAdaptiveAttempt = !string.IsNullOrEmpty(item.AudioPath);
+                PlayFile(streamUrl, targetRatio);
+
+                if (isAdaptiveAttempt)
+                {
+                    _ = FallbackYoutubeSeekToMuxedIfStalledAsync(item, targetRatio, seekGeneration, watchdogStartTicks);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (seekGeneration != Volatile.Read(ref _streamingSeekGeneration)) return;
+                bool fallbackStarted = await TryStartYoutubeMuxedFallbackAsync(item, targetRatio, seekGeneration);
+                if (!fallbackStarted)
+                {
+                    _isSeeking = false;
+                    WpfMessageBox.Show($"스트리밍 seek를 시작할 수 없습니다.\n{ex.Message}", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
+        }
+
+        private async Task FallbackYoutubeSeekToMuxedIfStalledAsync(PlaylistItem item, double targetRatio, int seekGeneration, long watchdogStartTicks)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            if (seekGeneration != Volatile.Read(ref _streamingSeekGeneration)) return;
+
+            long lastFrameTicks = Volatile.Read(ref _lastFrameTicks);
+            long lastAudioTicks = Volatile.Read(ref _lastAudioTicks);
+            if (lastFrameTicks > watchdogStartTicks || lastAudioTicks > watchdogStartTicks) return;
+
+            await TryStartYoutubeMuxedFallbackAsync(item, targetRatio, seekGeneration);
+        }
+
+        private async Task<bool> TryStartYoutubeMuxedFallbackAsync(PlaylistItem item, double targetRatio, int seekGeneration)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(item.YoutubeUrl)) return false;
+
+                var muxedUrl = await _streamingService.GetMuxedStreamUrlAsync(item.YoutubeUrl);
+                if (seekGeneration != Volatile.Read(ref _streamingSeekGeneration)) return true;
+                if (string.IsNullOrEmpty(muxedUrl)) return false;
+
+                item.Path = muxedUrl;
+                item.AudioPath = null;
+                _currentFilePath = muxedUrl;
+                PlayFile(muxedUrl, targetRatio);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to start YouTube muxed seek fallback", ex);
+                return false;
+            }
         }
 
         private void Decoder_SeekInitiated()
@@ -2492,6 +2928,7 @@ namespace JonPlayer
             }
             if (VideoElement != null) VideoElement.Source = null;
             if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
+            StopStreamingLoadingBlink();
             if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
             if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
             
@@ -2878,8 +3315,11 @@ namespace JonPlayer
             
             sb.AppendLine($"{"Codec".PadRight(12)}{codec}");
             sb.AppendLine($"{"Resolution".PadRight(12)}{res}");
-            sb.AppendLine($"{"FPS".PadRight(12)}{stats.ActualFps:F1} / {stats.TargetFps:F1}");
+            sb.AppendLine($"{"DecodeFPS".PadRight(12)}{stats.ActualFps:F1} / {stats.TargetFps:F1}");
+            sb.AppendLine($"{"DisplayFPS".PadRight(12)}{_renderer?.PresentedFps ?? 0:F1}");
+            sb.AppendLine($"{"Render Events".PadRight(14)}{_renderer?.RenderEventsPerSecond ?? 0}");
             sb.AppendLine($"{"Dropped".PadRight(12)}{stats.DroppedFrames}");
+            sb.AppendLine($"{"RenderSkip".PadRight(12)}{_renderer?.SkippedFramesPerSecond ?? 0}");
             sb.AppendLine($"{"Bitrate".PadRight(12)}{stats.Bitrate / 1000} kbps");
             sb.AppendLine($"{"HW Accel".PadRight(12)}{(stats.IsHwAccel ? "Active (D3D11)" : "Inactive (CPU)")}");
             sb.AppendLine();

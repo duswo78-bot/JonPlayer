@@ -41,7 +41,11 @@ namespace JonPlayer
     public unsafe class FFmpegMediaDecoder : IDisposable
     {
         public static bool EnableHwAccel = true;
+        private static readonly System.Buffers.ArrayPool<byte> _audioBufferPool = System.Buffers.ArrayPool<byte>.Shared;
+        private static readonly string _seekLogPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "seek_debug.log");
+        private static void SeekLog(string msg) { try { File.AppendAllText(_seekLogPath, $"{DateTime.Now:HH:mm:ss.fff} {msg}\n"); } catch { } }
         private AVFormatContext* _formatContext;
+        private AVFormatContext* _audioFormatContext; 
         
         // Video
         private AVCodecContext* _videoCodecContext;
@@ -51,6 +55,8 @@ namespace JonPlayer
         private SwsContext* _swsContext;
         
         private double _lastValidPtsTime = 0.0;
+        private double _baseAudioPtsMs = -1.0;
+        private long _totalOutputSamples = 0;
         private double _lastValidAudioPtsTime = 0.0;
         private byte[]? _bgraBuffer;
         private GCHandle _bgraBufferHandle;
@@ -88,6 +94,14 @@ namespace JonPlayer
 
         private System.Collections.Concurrent.ConcurrentBag<IntPtr> _packetPool = new System.Collections.Concurrent.ConcurrentBag<IntPtr>();
         private System.Collections.Concurrent.ConcurrentBag<IntPtr> _framePool = new System.Collections.Concurrent.ConcurrentBag<IntPtr>();
+
+        // [DASH A/V Sync Offset]
+        private double _avStartOffsetMs = 0.0;
+        private volatile bool _isFirstVideoFrame = true;
+        private volatile bool _isFirstAudioFrame = true;
+        private volatile bool _isPreBuffering = false;
+        private double _firstAudioPtsMs = -1.0;
+        private double _firstVideoPtsMs = -1.0;
 
         private AVPacket* GetPacket()
         {
@@ -132,23 +146,86 @@ namespace JonPlayer
         public event Action<IntPtr, int, int, int, bool>? FrameDecoded;
         public event Action<byte[], int>? AudioDataAvailable;
         public event Action<double>? RotationDetected;
-        public event Action<double>? PositionChanged; // 0.0 to 1.0 ratio
-        public event Action<TimeSpan, TimeSpan>? TimeUpdated; // Current, Total
+        public event Action<double>? PositionChanged; 
+        public event Action<TimeSpan, TimeSpan>? TimeUpdated; 
         public event Action? PlaybackFinished;
         public event Action? SeekPerformed;
         public event Action? SeekInitiated;
 
         public Func<double>? GetAudioBufferedDurationMs { get; set; }
+    public Func<double>? GetAudioHardwareLatencyMs { get; set; }
 
         public double DurationSeconds => _formatContext != null ? _formatContext->duration / (double)ffmpeg.AV_TIME_BASE : 0;
+
+        private static double GetStreamStartOffsetMs(AVFormatContext* formatContext, int streamIndex)
+        {
+            if (formatContext == null || streamIndex < 0 || streamIndex >= formatContext->nb_streams) return 0.0;
+
+            AVStream* stream = formatContext->streams[streamIndex];
+            if (stream != null && stream->start_time != ffmpeg.AV_NOPTS_VALUE)
+            {
+                return stream->start_time * ffmpeg.av_q2d(stream->time_base) * 1000.0;
+            }
+
+            if (formatContext->start_time != ffmpeg.AV_NOPTS_VALUE)
+            {
+                return formatContext->start_time * 1000.0 / ffmpeg.AV_TIME_BASE;
+            }
+
+            return 0.0;
+        }
+
+        private static double GetNormalizedPtsMs(long pts, AVFormatContext* formatContext, int streamIndex)
+        {
+            if (formatContext == null || streamIndex < 0 || streamIndex >= formatContext->nb_streams || pts == ffmpeg.AV_NOPTS_VALUE) return 0.0;
+
+            AVStream* stream = formatContext->streams[streamIndex];
+            if (stream == null) return 0.0;
+            return pts * ffmpeg.av_q2d(stream->time_base) * 1000.0 - GetStreamStartOffsetMs(formatContext, streamIndex);
+        }
+
+        private static long GetSeekTimestamp(AVFormatContext* formatContext, double targetMs)
+        {
+            long startTime = formatContext != null && formatContext->start_time != ffmpeg.AV_NOPTS_VALUE ? formatContext->start_time : 0;
+            return startTime + (long)(targetMs / 1000.0 * ffmpeg.AV_TIME_BASE);
+        }
+
+        private static long GetStreamSeekTimestamp(AVFormatContext* formatContext, int streamIndex, double targetMs)
+        {
+            if (formatContext == null || streamIndex < 0 || streamIndex >= formatContext->nb_streams) return ffmpeg.AV_NOPTS_VALUE;
+
+            AVStream* stream = formatContext->streams[streamIndex];
+            if (stream == null) return ffmpeg.AV_NOPTS_VALUE;
+
+            double rawPtsMs = targetMs + GetStreamStartOffsetMs(formatContext, streamIndex);
+            return (long)(rawPtsMs / 1000.0 / ffmpeg.av_q2d(stream->time_base));
+        }
+
+        private static int SeekFormatContext(AVFormatContext* formatContext, int streamIndex, double targetMs)
+        {
+            long streamTarget = GetStreamSeekTimestamp(formatContext, streamIndex, targetMs);
+            if (streamTarget != ffmpeg.AV_NOPTS_VALUE)
+            {
+                int streamSeekRet = ffmpeg.av_seek_frame(formatContext, streamIndex, streamTarget, ffmpeg.AVSEEK_FLAG_BACKWARD);
+                if (streamSeekRet >= 0) return streamSeekRet;
+
+                streamSeekRet = ffmpeg.avformat_seek_file(formatContext, streamIndex, long.MinValue, streamTarget, streamTarget, ffmpeg.AVSEEK_FLAG_BACKWARD);
+                if (streamSeekRet >= 0) return streamSeekRet;
+            }
+
+            long seekTarget = GetSeekTimestamp(formatContext, targetMs);
+            return ffmpeg.avformat_seek_file(formatContext, -1, long.MinValue, seekTarget, seekTarget, ffmpeg.AVSEEK_FLAG_BACKWARD);
+        }
 
         public int Width => _width;
         public int Height => _height;
 
         private string? _currentPath;
+        private string? _separateAudioUrl; 
         private double _seekTargetMs = -1;
         private volatile bool _isFinished;
         private volatile bool _notifiedPlaybackFinished;
+        private volatile bool _videoEof;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate AVPixelFormat AVPixelFormat_get_format_func(AVCodecContext* s, AVPixelFormat* fmt);
@@ -163,12 +240,10 @@ namespace JonPlayer
         private volatile bool _isSeekingAudio = false;
         private double _seekTargetPtsTime = -1;
         private bool _isDisposed;
+        private int _isOpening;
         
-        // Audio Filter Properties
         public double AudioVolumeLevel { get; private set; } = 1.0;
         public double AudioVocalGain { get; private set; } = 0.0;
-
-        // Video Filter Properties
         public double VideoBrightness { get; private set; } = 0.0;
         public double VideoContrast { get; private set; } = 1.0;
         public double VideoSaturation { get; private set; } = 1.0;
@@ -216,16 +291,29 @@ namespace JonPlayer
             _d3d11ContextPtr = contextPtr;
         }
 
-        public void Open(string path)
+        public void Open(string path, string? audioUrl = null, double initialSeekRatio = 0.0)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(FFmpegMediaDecoder));
             Stop();
+            Interlocked.Exchange(ref _isOpening, 1);
 
             _currentPath = path;
+            _separateAudioUrl = audioUrl;
             
             _videoStreamIndex = -1;
             _audioStreamIndex = -1;
             _isInterruptRequested = false;
+
+            _isFirstVideoFrame = true;
+            _isFirstAudioFrame = true;
+            _isPreBuffering = true;
+            _firstAudioPtsMs = -1.0;
+            _firstVideoPtsMs = -1.0;
+            _avStartOffsetMs = 0.0;
+            _seekTargetMs = -1;
+            _seekTargetPtsTime = -1;
+            _isSeekingVideo = false;
+            _isSeekingAudio = false;
 
             try
             {
@@ -237,16 +325,39 @@ namespace JonPlayer
                 _formatContext->probesize = 5000000;
                 _formatContext->max_analyze_duration = 2 * FFmpeg.AutoGen.ffmpeg.AV_TIME_BASE;
 
+                var dictPtr = (AVDictionary**)0;
+                AVDictionary* options = null;
+                if (path.StartsWith("http", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase))
+                {
+                    ffmpeg.av_dict_set(&options, "reconnect", "1", 0);
+                    ffmpeg.av_dict_set(&options, "reconnect_streamed", "1", 0);
+                    ffmpeg.av_dict_set(&options, "reconnect_delay_max", "5", 0);
+                    ffmpeg.av_dict_set(&options, "reconnect_on_network_error", "1", 0);
+                    ffmpeg.av_dict_set(&options, "reconnect_on_http_error", "4xx,5xx", 0);
+                    ffmpeg.av_dict_set(&options, "rw_timeout", "10000000", 0);
+                    ffmpeg.av_dict_set(&options, "seekable", "1", 0);
+                    ffmpeg.av_dict_set(&options, "user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 0);
+                }
+
                 fixed (AVFormatContext** pFormatContext = &_formatContext)
                 {
-                    if (ffmpeg.avformat_open_input(pFormatContext, path, null, null) < 0)
+                    if (ffmpeg.avformat_open_input(pFormatContext, path, null, &options) < 0)
+                    {
+                        _formatContext = null;
+                        if (options != null) ffmpeg.av_dict_free(&options);
                         throw new Exception("Could not open file");
+                    }
                 }
+                if (options != null) ffmpeg.av_dict_free(&options);
 
                 if (ffmpeg.avformat_find_stream_info(_formatContext, null) < 0)
                     throw new Exception("Could not find stream info");
 
-                ffmpeg.avformat_seek_file(_formatContext, -1, long.MinValue, 0, 0, ffmpeg.AVSEEK_FLAG_BACKWARD);
+                if (!path.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                {
+                    long startSeekTarget = GetSeekTimestamp(_formatContext, 0);
+                    ffmpeg.avformat_seek_file(_formatContext, -1, long.MinValue, startSeekTarget, startSeekTarget, ffmpeg.AVSEEK_FLAG_BACKWARD);
+                }
 
                 for (int i = 0; i < _formatContext->nb_streams; i++)
                 {
@@ -266,14 +377,21 @@ namespace JonPlayer
                 if (_videoStreamIndex == -1 && _audioStreamIndex == -1)
                     throw new Exception("Could not find any video or audio stream");
 
+                double initialSeekTargetMs = -1.0;
+                if (initialSeekRatio > 0.0 && _formatContext->duration > 0)
+                {
+                    initialSeekTargetMs = Math.Clamp(initialSeekRatio, 0.0, 1.0) * _formatContext->duration * 1000.0 / ffmpeg.AV_TIME_BASE;
+                    int primarySeekStreamIndex = _videoStreamIndex != -1 ? _videoStreamIndex : _audioStreamIndex;
+                    int initialSeekRet = SeekFormatContext(_formatContext, primarySeekStreamIndex, initialSeekTargetMs);
+                    if (initialSeekRet < 0) SeekLog($"[OPEN_SEEK_FAIL] target={initialSeekTargetMs:F0} ret={initialSeekRet}");
+                }
+
                 if (_videoStreamIndex != -1)
                 {
-                    // Check for rotation metadata
                     var stream = _formatContext->streams[_videoStreamIndex];
                     double rotation = 0;
                     bool rotationFound = false;
 
-                    // Method 1: AV_PKT_DATA_DISPLAYMATRIX
                     var codecpar = _formatContext->streams[_videoStreamIndex]->codecpar;
                     var displayMatrixData = ffmpeg.av_packet_side_data_get(codecpar->coded_side_data, codecpar->nb_coded_side_data, AVPacketSideDataType.AV_PKT_DATA_DISPLAYMATRIX);
                     
@@ -283,12 +401,11 @@ namespace JonPlayer
                         double theta = ffmpeg.av_display_rotation_get(in *pMatrix);
                         if (!double.IsNaN(theta))
                         {
-                            rotation = -theta; // FFmpeg is CCW, WPF is CW
+                            rotation = -theta; 
                             rotationFound = true;
                         }
                     }
 
-                    // Method 2: rotate metadata tag (fallback)
                     if (!rotationFound)
                     {
                         var entry = ffmpeg.av_dict_get(stream->metadata, "rotate", null, 0);
@@ -308,7 +425,6 @@ namespace JonPlayer
                         RotationDetected?.Invoke(rotation);
                     }
 
-                    // --- Setup Video ---
                     var videoCodecPar = _formatContext->streams[_videoStreamIndex]->codecpar;
                     var videoCodec = ffmpeg.avcodec_find_decoder(videoCodecPar->codec_id);
                     _videoCodecContext = ffmpeg.avcodec_alloc_context3(videoCodec);
@@ -327,14 +443,9 @@ namespace JonPlayer
                         {
                             var deviceCtx = (AVHWDeviceContext*)hwDeviceCtx->data;
                             var d3d11DeviceCtx = (AVD3D11VADeviceContext*)deviceCtx->hwctx;
-                            // FFmpeg will take ownership of these COM pointers and call Release() on them
-                            // when the hwdevice_ctx is freed. Therefore, we MUST AddRef them here to prevent
-                            // premature destruction of our D3D11 device and context.
                             System.Runtime.InteropServices.Marshal.AddRef(_d3d11DevicePtr);
                             d3d11DeviceCtx->device = _d3d11DevicePtr;
-                            
-                            System.Runtime.InteropServices.Marshal.AddRef(_d3d11ContextPtr);
-                            d3d11DeviceCtx->device_context = _d3d11ContextPtr;
+                            d3d11DeviceCtx->device_context = IntPtr.Zero;
 
                             if (ffmpeg.av_hwdevice_ctx_init(hwDeviceCtx) == 0)
                             {
@@ -385,10 +496,51 @@ namespace JonPlayer
                     };
                 }
 
-                // --- Setup Audio ---
+                if (_audioStreamIndex == -1 && !string.IsNullOrEmpty(_separateAudioUrl))
+                {
+                    _audioFormatContext = ffmpeg.avformat_alloc_context();
+                    AVDictionary* audioOptions = null;
+                    ffmpeg.av_dict_set(&audioOptions, "reconnect", "1", 0);
+                    ffmpeg.av_dict_set(&audioOptions, "reconnect_streamed", "1", 0);
+                    ffmpeg.av_dict_set(&audioOptions, "reconnect_delay_max", "5", 0);
+                    ffmpeg.av_dict_set(&audioOptions, "rw_timeout", "10000000", 0);
+                    ffmpeg.av_dict_set(&audioOptions, "seekable", "1", 0);
+                    ffmpeg.av_dict_set(&audioOptions, "user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 0);
+
+                    fixed (AVFormatContext** pAudioFmtCtx = &_audioFormatContext)
+                    {
+                        if (ffmpeg.avformat_open_input(pAudioFmtCtx, _separateAudioUrl, null, &audioOptions) < 0)
+                        {
+                            _audioFormatContext = null;
+                            if (audioOptions != null) ffmpeg.av_dict_free(&audioOptions);
+                        }
+                    }
+                    if (audioOptions != null) ffmpeg.av_dict_free(&audioOptions);
+
+                    if (_audioFormatContext != null)
+                    {
+                        ffmpeg.avformat_find_stream_info(_audioFormatContext, null);
+                        for (int i = 0; i < _audioFormatContext->nb_streams; i++)
+                        {
+                            if (_audioFormatContext->streams[i]->codecpar->codec_type == AVMediaType.AVMEDIA_TYPE_AUDIO)
+                            {
+                                _audioStreamIndex = i;
+                                break;
+                            }
+                        }
+
+                        if (initialSeekTargetMs >= 0.0)
+                        {
+                            int initialAudioSeekRet = SeekFormatContext(_audioFormatContext, _audioStreamIndex, initialSeekTargetMs);
+                            if (initialAudioSeekRet < 0) SeekLog($"[OPEN_SEEK_FAIL_AUDIO] target={initialSeekTargetMs:F0} ret={initialAudioSeekRet}");
+                        }
+                    }
+                }
+
                 if (_audioStreamIndex != -1)
                 {
-                    var audioCodecPar = _formatContext->streams[_audioStreamIndex]->codecpar;
+                    var audioFmtCtx = _audioFormatContext != null ? _audioFormatContext : _formatContext;
+                    var audioCodecPar = audioFmtCtx->streams[_audioStreamIndex]->codecpar;
                     var audioCodec = ffmpeg.avcodec_find_decoder(audioCodecPar->codec_id);
                     _audioCodecContext = ffmpeg.avcodec_alloc_context3(audioCodec);
                     ffmpeg.avcodec_parameters_to_context(_audioCodecContext, audioCodecPar);
@@ -412,8 +564,8 @@ namespace JonPlayer
                     _stats.AudioInfo = "No Audio";
                 }
 
-                _videoPacketQueue.Clear();
-                _audioPacketQueue.Clear();
+                while (_videoPacketQueue.TryDequeue(out IntPtr p)) ReturnPacket((AVPacket*)p);
+                while (_audioPacketQueue.TryDequeue(out IntPtr p)) ReturnPacket((AVPacket*)p);
 
                 _audioFrame = GetFrame();
                 _videoFrame = GetFrame();
@@ -421,25 +573,33 @@ namespace JonPlayer
                 _isRunning = true;
                 _isPaused = true;
                 _isFinished = false;
+                _videoEof = false;
+                
+                if (_audioStreamIndex != -1)
+                {
+                    Interlocked.Increment(ref _activeThreads);
+                    _audioThread = new Thread(AudioDecodeLoop) { IsBackground = true, Name = "FFmpegAudioThread" };
+                    _audioThread.Start();
+                }
 
+                Interlocked.Increment(ref _activeThreads);
                 _readThread = new Thread(ReadLoop) { IsBackground = true, Name = "FFmpegReadThread" };
                 _readThread.Start();
                 if (HasVideo)
                 {
+                    Interlocked.Increment(ref _activeThreads);
                     _videoThread = new Thread(VideoDecodeLoop) { IsBackground = true, Name = "FFmpegVideoThread" };
                     _videoThread.Start();
-                }
-                
-                if (_audioStreamIndex != -1)
-                {
-                    _audioThread = new Thread(AudioDecodeLoop) { IsBackground = true, Name = "FFmpegAudioThread" };
-                    _audioThread.Start();
                 }
             }
             catch
             {
                 Cleanup();
                 throw;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isOpening, 0);
             }
         }
 
@@ -453,7 +613,6 @@ namespace JonPlayer
                 ptr++;
             }
             
-            // SW Fallback
             ptr = fmt;
             while (*ptr != AVPixelFormat.AV_PIX_FMT_NONE)
             {
@@ -468,6 +627,8 @@ namespace JonPlayer
 
         private void InitAudioFilterGraph()
         {
+            if (_audioStreamIndex == -1 || _audioCodecContext == null) return;
+
             if (_audioFilterGraph != null)
             {
                 fixed (AVFilterGraph** pGraph = &_audioFilterGraph)
@@ -486,7 +647,8 @@ namespace JonPlayer
             var atempo = ffmpeg.avfilter_get_by_name("atempo");
             var abuffersink = ffmpeg.avfilter_get_by_name("abuffersink");
 
-            AVRational timeBase = _formatContext->streams[_audioStreamIndex]->time_base;
+            var audioFmtCtxForTb = _audioFormatContext != null ? _audioFormatContext : _formatContext;
+            AVRational timeBase = audioFmtCtxForTb->streams[_audioStreamIndex]->time_base;
 
             AVChannelLayout chLayout = _audioCodecContext->ch_layout;
             byte* layoutDesc = stackalloc byte[128];
@@ -500,22 +662,22 @@ namespace JonPlayer
 
             AVFilterContext* abufferCtx = null;
             int ret1 = ffmpeg.avfilter_graph_create_filter(&abufferCtx, abuffer, "in", args, null, _audioFilterGraph);
-            if (ret1 < 0) 
-            {
-                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to create abuffer filter. Error: {ret1}. Args: {args}\n");
-                fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
-                return;
-            }
+            if (ret1 < 0) return;
 
             AVFilterContext* abuffersinkCtx = null;
             int ret2 = ffmpeg.avfilter_graph_create_filter(&abuffersinkCtx, abuffersink, "out", null, null, _audioFilterGraph);
-            if (ret2 < 0) 
-            {
-                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to create abuffersink filter. Error: {ret2}\n");
-                fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
-                return;
-            }
-            string filterDesc = $"equalizer@feq=f=1000:width_type=h:width=200:g={AudioVocalGain.ToString(System.Globalization.CultureInfo.InvariantCulture)},volume@fvol=volume={AudioVolumeLevel.ToString(System.Globalization.CultureInfo.InvariantCulture)},atempo@fatempo={_playbackSpeed.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            if (ret2 < 0) return;
+            
+            double speed = Math.Max(0.25, Math.Min(4.0, _playbackSpeed));
+            string atempoChain;
+            if (speed > 2.0)
+                atempoChain = $"atempo=2.0,atempo@fatempo={(speed / 2.0).ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            else if (speed < 0.5)
+                atempoChain = $"atempo=0.5,atempo@fatempo={(speed / 0.5).ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            else
+                atempoChain = $"atempo@fatempo={speed.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+            string filterDesc = $"equalizer@feq=f=1000:width_type=h:width=200:g={AudioVocalGain.ToString(System.Globalization.CultureInfo.InvariantCulture)},volume@fvol=volume={AudioVolumeLevel.ToString(System.Globalization.CultureInfo.InvariantCulture)},{atempoChain}";
 
             AVFilterInOut* outputs = ffmpeg.avfilter_inout_alloc();
             AVFilterInOut* inputs = ffmpeg.avfilter_inout_alloc();
@@ -533,7 +695,6 @@ namespace JonPlayer
             int parseRet = ffmpeg.avfilter_graph_parse_ptr(_audioFilterGraph, filterDesc, &inputs, &outputs, null);
             if (parseRet < 0)
             {
-                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to parse filterDesc. Error: {parseRet}. String: {filterDesc}\n");
                 ffmpeg.avfilter_inout_free(&inputs);
                 ffmpeg.avfilter_inout_free(&outputs);
                 fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
@@ -542,7 +703,6 @@ namespace JonPlayer
             int configRet = ffmpeg.avfilter_graph_config(_audioFilterGraph, null);
             if (configRet < 0)
             {
-                System.IO.File.AppendAllText("ffmpeg_debug.txt", $"Failed to config filter graph. Error: {configRet}\n");
                 ffmpeg.avfilter_inout_free(&inputs);
                 ffmpeg.avfilter_inout_free(&outputs);
                 fixed (AVFilterGraph** pGraph = &_audioFilterGraph) ffmpeg.avfilter_graph_free(pGraph);
@@ -575,6 +735,8 @@ namespace JonPlayer
             }
         }
 
+        private int _activeThreads = 0;
+
         public void Stop()
         {
             _isInterruptRequested = true;
@@ -585,41 +747,14 @@ namespace JonPlayer
                 _isPaused = false;
                 Monitor.PulseAll(_lock);
             }
+        }
 
-            if (_readThread != null && _readThread.IsAlive)
+        private void ThreadFinished()
+        {
+            if (Interlocked.Decrement(ref _activeThreads) == 0)
             {
-                if (!_readThread.Join(1000))
-                {
-                    System.Diagnostics.Debug.WriteLine("ReadThread join timed out.");
-                }
+                Cleanup();
             }
-            if (_videoThread != null && _videoThread.IsAlive)
-            {
-                if (!_videoThread.Join(1000))
-                {
-                    System.Diagnostics.Debug.WriteLine("VideoThread join timed out.");
-                }
-            }
-            if (_audioThread != null && _audioThread.IsAlive)
-            {
-                if (!_audioThread.Join(1000))
-                {
-                    System.Diagnostics.Debug.WriteLine("AudioThread join timed out.");
-                }
-            }
-
-            while (_videoPacketQueue.TryDequeue(out IntPtr p))
-            {
-                var pt = (AVPacket*)p;
-                ReturnPacket(pt);
-            }
-            while (_audioPacketQueue.TryDequeue(out IntPtr p))
-            {
-                var pt = (AVPacket*)p;
-                ReturnPacket(pt);
-            }
-
-            Cleanup();
         }
 
         public void Seek(double ratio)
@@ -644,12 +779,8 @@ namespace JonPlayer
                 {
                     _playbackSpeed = speed;
                     _speedChanged = true;
-
-                    if (_audioFilterGraph != null && _atempoCtx != null)
-                    {
-                        string speedStr = speed.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                        ffmpeg.avfilter_graph_send_command(_audioFilterGraph, "fatempo", "tempo", speedStr, null, 0, 0);
-                    }
+                    _rebuildAudioFilters = true;
+                    _baseAudioPtsMs = -1.0;
                     Monitor.PulseAll(_lock);
                 }
             }
@@ -681,6 +812,7 @@ namespace JonPlayer
         {
             while (_isRunning)
             {
+                double currentSeekTargetMs = -1;
                 lock (_lock)
                 {
                     if (_isFinished)
@@ -692,79 +824,160 @@ namespace JonPlayer
                         }
                     }
 
-                    if (_isPaused)
-                    {
-                        Monitor.Wait(_lock, 50);
-                        continue;
-                    }
-
-                    while (_isRunning && ((_videoStreamIndex != -1 && _videoPacketQueue.Count > 60) || (_audioStreamIndex != -1 && _audioPacketQueue.Count > 100)))
-                    {
-                        if (_seekTargetMs >= 0) break;
-                        Monitor.Wait(_lock, 50);
-                    }
-                    
                     if (_seekTargetMs >= 0)
                     {
-                        long seekTarget = (long)(_seekTargetMs / 1000.0 * ffmpeg.AV_TIME_BASE);
-                        ffmpeg.avformat_seek_file(_formatContext, -1, long.MinValue, seekTarget, seekTarget, ffmpeg.AVSEEK_FLAG_BACKWARD);
-                        
-                        while (_videoPacketQueue.TryDequeue(out IntPtr p))
+                        currentSeekTargetMs = _seekTargetMs;
+                    }
+                    else
+                    {
+                        if (_isPaused)
                         {
-                            var pt = (AVPacket*)p;
-                            ReturnPacket(pt);
+                            Monitor.Wait(_lock, 50);
+                            continue;
                         }
-                        while (_audioPacketQueue.TryDequeue(out IntPtr p))
+
+                        bool videoFull = _videoStreamIndex != -1 && _videoPacketQueue.Count > 120;
+                        bool audioFull = _audioStreamIndex != -1 && _audioPacketQueue.Count > 300;
+
+                        if (_isPreBuffering)
                         {
-                            var pt = (AVPacket*)p;
-                            ReturnPacket(pt);
+                            bool videoReady = _videoStreamIndex == -1 || _videoEof || _videoPacketQueue.Count >= 60;
+                            bool audioReady = _audioStreamIndex == -1 || _videoEof || _audioPacketQueue.Count >= 100;
+                            bool videoMaxed = _videoStreamIndex != -1 && _videoPacketQueue.Count >= 120;
+                            bool audioMaxed = _audioStreamIndex != -1 && _audioPacketQueue.Count >= 300;
+                            if ((videoReady && audioReady) || videoMaxed || audioMaxed)
+                            {
+                                _isPreBuffering = false;
+                            }
                         }
+
+                        if (_audioFormatContext == null)
+                        {
+                            while (_isRunning && _seekTargetMs < 0 && (videoFull || audioFull))
+                            {
+                                Monitor.Wait(_lock, 20);
+                                videoFull = _videoStreamIndex != -1 && _videoPacketQueue.Count > 120;
+                                audioFull = _audioStreamIndex != -1 && _audioPacketQueue.Count > 300;
+                            }
+                        }
+                        else
+                        {
+                            while (_isRunning && _seekTargetMs < 0 && (videoFull && audioFull))
+                            {
+                                Monitor.Wait(_lock, 20);
+                                videoFull = _videoStreamIndex != -1 && _videoPacketQueue.Count > 120;
+                                audioFull = _audioStreamIndex != -1 && _audioPacketQueue.Count > 300;
+                            }
+                        }
+                    }
+                } 
+
+                if (currentSeekTargetMs >= 0)
+                {
+                    int videoSeekRet = SeekFormatContext(_formatContext, _videoStreamIndex, currentSeekTargetMs);
+                    if (_audioFormatContext != null)
+                    {
+                        int audioSeekRet = SeekFormatContext(_audioFormatContext, _audioStreamIndex, currentSeekTargetMs);
+                        if (audioSeekRet < 0) SeekLog($"[SEEK_FAIL_AUDIO] target={currentSeekTargetMs:F0} ret={audioSeekRet}");
+                    }
+
+                    if (videoSeekRet < 0) SeekLog($"[SEEK_FAIL_VIDEO] target={currentSeekTargetMs:F0} ret={videoSeekRet}");
+
+                    lock (_lock)
+                    {
+                        while (_videoPacketQueue.TryDequeue(out IntPtr p)) ReturnPacket((AVPacket*)p);
+                        while (_audioPacketQueue.TryDequeue(out IntPtr p)) ReturnPacket((AVPacket*)p);
 
                         Interlocked.Exchange(ref _needsVideoFlush, 1);
                         if (_audioStreamIndex != -1) Interlocked.Exchange(ref _needsAudioFlush, 1);
 
                         _lastValidPtsTime = 0;
                         _lastValidAudioPtsTime = 0;
-                        _seekTargetMs = -1;
+                        
+                        _isFirstVideoFrame = true;
+                        _isFirstAudioFrame = true;
+                        _isPreBuffering = true;
+                        _firstAudioPtsMs = -1.0;
+                        _firstVideoPtsMs = -1.0;
+                        _avStartOffsetMs = 0.0;
+                        
+                        if (_seekTargetMs == currentSeekTargetMs) _seekTargetMs = -1;
+                        
                         _isFinished = false;
                         _notifiedPlaybackFinished = false;
+                        _videoEof = false;
                         SeekInitiated?.Invoke();
+                        Monitor.PulseAll(_lock);
                     }
+                    continue;
                 }
 
                 if (_isFinished) continue;
 
-                int readRes = ffmpeg.av_read_frame(_formatContext, _packet);
-                if (readRes < 0)
+                bool videoFullCheck = _videoStreamIndex != -1 && _videoPacketQueue.Count > 120;
+                bool audioFullCheck = _audioStreamIndex != -1 && _audioPacketQueue.Count > 300;
+
+                int readRes = ffmpeg.AVERROR_EOF;
+                if (!_videoEof && (_audioFormatContext == null || !videoFullCheck))
                 {
-                    if (readRes == ffmpeg.AVERROR_EOF)
+                    readRes = ffmpeg.av_read_frame(_formatContext, _packet);
+                    if (readRes < 0)
                     {
-                        _isFinished = true;
                         ffmpeg.av_packet_unref(_packet);
-                        continue;
+                        if (readRes == ffmpeg.AVERROR_EOF)
+                        {
+                            _videoEof = true;
+                            if (_audioFormatContext == null)
+                            {
+                                _isFinished = true;
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            _isFinished = true;
+                            break;
+                        }
                     }
-                    ffmpeg.av_packet_unref(_packet);
-                    _isFinished = true;
-                    break;
                 }
 
-                if (_packet->stream_index == _videoStreamIndex)
+                if (!_videoEof && readRes >= 0)
                 {
-                    var newPkt = GetPacket();
-                    ffmpeg.av_packet_ref(newPkt, _packet);
-                    _videoPacketQueue.Enqueue((IntPtr)newPkt);
-                    lock (_lock) { Monitor.PulseAll(_lock); }
+                    if (_packet->stream_index == _videoStreamIndex)
+                    {
+                        var newPkt = GetPacket();
+                        ffmpeg.av_packet_ref(newPkt, _packet);
+                        _videoPacketQueue.Enqueue((IntPtr)newPkt);
+                        lock (_lock) { Monitor.PulseAll(_lock); }
+                    }
+                    else if (_packet->stream_index == _audioStreamIndex && _audioStreamIndex != -1 && _audioFormatContext == null)
+                    {
+                        var newPkt = GetPacket();
+                        ffmpeg.av_packet_ref(newPkt, _packet);
+                        _audioPacketQueue.Enqueue((IntPtr)newPkt);
+                        lock (_lock) { Monitor.PulseAll(_lock); }
+                    }
+                    ffmpeg.av_packet_unref(_packet);
                 }
-                else if (_packet->stream_index == _audioStreamIndex && _audioStreamIndex != -1)
+
+                if (_audioFormatContext != null && _audioStreamIndex != -1 && !audioFullCheck)
                 {
-                    var newPkt = GetPacket();
-                    ffmpeg.av_packet_ref(newPkt, _packet);
-                    _audioPacketQueue.Enqueue((IntPtr)newPkt);
-                    lock (_lock) { Monitor.PulseAll(_lock); }
+                    var audioPkt = GetPacket();
+                    int audioReadRes = ffmpeg.av_read_frame(_audioFormatContext, audioPkt);
+                    if (audioReadRes >= 0 && audioPkt->stream_index == _audioStreamIndex)
+                    {
+                        _audioPacketQueue.Enqueue((IntPtr)audioPkt);
+                        lock (_lock) { Monitor.PulseAll(_lock); }
+                    }
+                    else
+                    {
+                        ReturnPacket(audioPkt);
+                        if (audioReadRes == ffmpeg.AVERROR_EOF && _videoEof) _isFinished = true;
+                        else if (audioReadRes < 0 && audioReadRes != ffmpeg.AVERROR_EOF) _isFinished = true;
+                    }
                 }
-                
-                ffmpeg.av_packet_unref(_packet);
             }
+            ThreadFinished();
         }
 
         private void AudioDecodeLoop()
@@ -782,15 +995,42 @@ namespace JonPlayer
                     if (Interlocked.Exchange(ref _needsAudioFlush, 0) == 1)
                     {
                         ffmpeg.avcodec_flush_buffers(_audioCodecContext);
-                        _isSeekingAudio = true;
+                        _rebuildAudioFilters = true;
+                        _baseAudioPtsMs = -1.0;
+
+                        // seek 후 swr 내부 버퍼 잔류 샘플 제거
+                        if (_swrContext != null)
+                        {
+                            var s = _swrContext;
+                            ffmpeg.swr_free(&s);
+                            _swrContext = null;
+                        }
+
+                        // filter graph 내부 버퍼도 즉시 해제
+                        if (_audioFilterGraph != null)
+                        {
+                            var g = _audioFilterGraph;
+                            ffmpeg.avfilter_graph_free(&g);
+                            _audioFilterGraph = null;
+                            _abufferCtx = null;
+                            _atempoCtx = null;
+                            _abuffersinkCtx = null;
+                        }
+                        SeekLog($"[SEEK_AUDIO_FLUSH] seekTarget={_seekTargetPtsTime:F0} lastAudioPts={_lastValidAudioPtsTime:F0}");
                     }
 
                     if (GetAudioBufferedDurationMs != null)
                     {
-                        while (GetAudioBufferedDurationMs() > 2000 && _isRunning && _needsAudioFlush == 0)
+                        while (GetAudioBufferedDurationMs() > 300 && _isRunning && _needsAudioFlush == 0)
                         {
                             Thread.Sleep(5);
                         }
+                    }
+
+                    if (_isPreBuffering && !_isFirstAudioFrame)
+                    {
+                        Thread.Sleep(10);
+                        continue;
                     }
 
                     if (!_audioPacketQueue.TryDequeue(out IntPtr pktPtr))
@@ -850,10 +1090,25 @@ namespace JonPlayer
                             {
                                 InitAudioFilterGraph();
                                 _rebuildAudioFilters = false;
+                                _baseAudioPtsMs = -1.0;
                             }
 
                             if (_audioFilterGraph != null && _abufferCtx != null && _abuffersinkCtx != null)
                             {
+                                long inPts = _audioFrame->best_effort_timestamp;
+                                if (inPts == ffmpeg.AV_NOPTS_VALUE) inPts = _audioFrame->pts;
+                                if (inPts == ffmpeg.AV_NOPTS_VALUE) inPts = _audioFrame->pkt_dts;
+                                if (inPts != ffmpeg.AV_NOPTS_VALUE)
+                                {
+                                    var audioFmtCtx = _audioFormatContext != null ? _audioFormatContext : _formatContext;
+                                    double ptsMs = GetNormalizedPtsMs(inPts, audioFmtCtx, _audioStreamIndex);
+                                    if (_baseAudioPtsMs < 0) 
+                                    {
+                                        _baseAudioPtsMs = ptsMs;
+                                        _totalOutputSamples = 0;
+                                    }
+                                }
+
                                 if (ffmpeg.av_buffersrc_add_frame(_abufferCtx, _audioFrame) >= 0)
                                 {
                                     while (true)
@@ -864,6 +1119,22 @@ namespace JonPlayer
                                         if (sinkRet < 0)
                                             break;
 
+                                        _totalOutputSamples += _filteredAudioFrame->nb_samples;
+                                        if (_baseAudioPtsMs >= 0 && _filteredAudioFrame->sample_rate > 0)
+                                        {
+                                            _lastValidAudioPtsTime = _baseAudioPtsMs + ((double)_totalOutputSamples * _playbackSpeed * 1000.0 / _filteredAudioFrame->sample_rate);
+                                            
+                                            if (_isFirstAudioFrame && _lastValidAudioPtsTime > 0)
+                                            {
+                                                _firstAudioPtsMs = _lastValidAudioPtsTime;
+                                                _isFirstAudioFrame = false;
+                                                if (!_isFirstVideoFrame && _firstVideoPtsMs >= 0)
+                                                {
+                                                    _avStartOffsetMs = _firstVideoPtsMs - _firstAudioPtsMs;
+                                                }
+                                            }
+                                        }
+
                                         ProcessAndConvertAudioFrame(_filteredAudioFrame);
                                         ffmpeg.av_frame_unref(_filteredAudioFrame);
                                     }
@@ -872,6 +1143,29 @@ namespace JonPlayer
                             }
                             else
                             {
+                                long inPts = _audioFrame->best_effort_timestamp;
+                                if (inPts == ffmpeg.AV_NOPTS_VALUE) inPts = _audioFrame->pts;
+                                if (inPts == ffmpeg.AV_NOPTS_VALUE) inPts = _audioFrame->pkt_dts;
+                                if (inPts != ffmpeg.AV_NOPTS_VALUE)
+                                {
+                                    var audioFmtCtx = _audioFormatContext != null ? _audioFormatContext : _formatContext;
+                                    _lastValidAudioPtsTime = GetNormalizedPtsMs(inPts, audioFmtCtx, _audioStreamIndex);
+                                    
+                                    if (_isFirstAudioFrame && _lastValidAudioPtsTime > 0)
+                                    {
+                                        _firstAudioPtsMs = _lastValidAudioPtsTime;
+                                        _isFirstAudioFrame = false;
+                                        if (!_isFirstVideoFrame && _firstVideoPtsMs >= 0)
+                                        {
+                                            _avStartOffsetMs = _firstVideoPtsMs - _firstAudioPtsMs;
+                                        }
+                                    }
+                                }
+                                else if (_audioCodecContext->sample_rate > 0)
+                                {
+                                    _lastValidAudioPtsTime += 1000.0 * _audioFrame->nb_samples / _audioCodecContext->sample_rate;
+                                }
+
                                 ProcessAndConvertAudioFrame(_audioFrame);
                             }
                         }
@@ -882,6 +1176,7 @@ namespace JonPlayer
             {
                 System.Diagnostics.Debug.WriteLine($"Audio Decode Error: {ex.Message}");
             }
+            ThreadFinished();
         }
 
         private void ProcessAndConvertAudioFrame(AVFrame* frameToConvert)
@@ -916,28 +1211,11 @@ namespace JonPlayer
             }
             
             if (_swrContext == null) return;
-
-            var audioTimeBase = _formatContext->streams[_audioStreamIndex]->time_base;
-            long pts = frameToConvert->best_effort_timestamp;
-            if (pts == ffmpeg.AV_NOPTS_VALUE) pts = frameToConvert->pts;
-            if (pts == ffmpeg.AV_NOPTS_VALUE) pts = frameToConvert->pkt_dts;
             
-            double audioPtsTime = 0;
-            if (pts != ffmpeg.AV_NOPTS_VALUE)
-            {
-                audioPtsTime = pts * ffmpeg.av_q2d(audioTimeBase) * 1000.0;
-                _lastValidAudioPtsTime = audioPtsTime;
-            }
-            else
-            {
-                double frameDur = 1000.0 * frameToConvert->nb_samples / AudioSampleRate;
-                audioPtsTime = _lastValidAudioPtsTime + frameDur;
-                _lastValidAudioPtsTime = audioPtsTime;
-            }
-            
+            SeekLog($"[AUDIO_SKIP] isSeekingAudio={_isSeekingAudio} audioPts={_lastValidAudioPtsTime:F0} target={_seekTargetPtsTime:F0}");
             if (_isSeekingAudio)
             {
-                if (audioPtsTime < _seekTargetPtsTime - 50)
+                if (_lastValidAudioPtsTime < _seekTargetPtsTime - 50)
                 {
                     return;
                 }
@@ -966,14 +1244,21 @@ namespace JonPlayer
                 int bufferSize = ffmpeg.av_samples_get_buffer_size(null, AudioChannels, numSamplesConverted, AVSampleFormat.AV_SAMPLE_FMT_S16, 1);
                 if (bufferSize > 0 && bufferSize <= _audioMaxBufferSize)
                 {
-                    byte[] managedBuffer = new byte[bufferSize];
-                    System.Runtime.InteropServices.Marshal.Copy(_audioBufferPointer, managedBuffer, 0, bufferSize);
-                    AudioDataAvailable?.Invoke(managedBuffer, bufferSize);
+                    byte[] managedBuffer = _audioBufferPool.Rent(bufferSize);
+                    try
+                    {
+                        Marshal.Copy(_audioBufferPointer, managedBuffer, 0, bufferSize);
+                        AudioDataAvailable?.Invoke(managedBuffer, bufferSize);
+                    }
+                    finally
+                    {
+                        _audioBufferPool.Return(managedBuffer);
+                    }
                     
                     if (!HasVideo)
                     {
                         double bufferedMs = GetAudioBufferedDurationMs != null ? GetAudioBufferedDurationMs() : 0;
-                        double currentTimeSeconds = (audioPtsTime - bufferedMs) / 1000.0;
+                        double currentTimeSeconds = (_lastValidAudioPtsTime - bufferedMs) / 1000.0;
                         if (currentTimeSeconds < 0) currentTimeSeconds = 0;
                         
                         double durationInSeconds = _formatContext->duration / (double)ffmpeg.AV_TIME_BASE;
@@ -983,11 +1268,11 @@ namespace JonPlayer
                     }
                 }
             }
+            if (_isFirstAudioFrame) _isFirstAudioFrame = false;
         }
 
         private void VideoDecodeLoop()
         {
-            var videoTimeBase = _formatContext->streams[_videoStreamIndex]->time_base;
             double durationInSeconds = _formatContext->duration / (double)ffmpeg.AV_TIME_BASE;
             var totalTime = TimeSpan.FromSeconds(durationInSeconds);
 
@@ -1019,6 +1304,12 @@ namespace JonPlayer
                 {
                     ffmpeg.avcodec_flush_buffers(_videoCodecContext);
                     _isSeekingVideo = true;
+                }
+
+                if (_isPreBuffering && !_isFirstVideoFrame)
+                {
+                    Thread.Sleep(10);
+                    continue;
                 }
 
                 if (!_videoPacketQueue.TryDequeue(out IntPtr pktPtr))
@@ -1091,12 +1382,12 @@ namespace JonPlayer
                         double ptsTime = 0;
                         if (pts != ffmpeg.AV_NOPTS_VALUE)
                         {
-                            ptsTime = pts * ffmpeg.av_q2d(videoTimeBase) * 1000.0;
+                            ptsTime = GetNormalizedPtsMs(pts, _formatContext, _videoStreamIndex);
                             _lastValidPtsTime = ptsTime;
                         }
                         else
                         {
-                            double frameDuration = 33.3; // fallback 30fps
+                            double frameDuration = 33.3; 
                             if (_videoCodecContext->framerate.num > 0 && _videoCodecContext->framerate.den > 0)
                                 frameDuration = 1000.0 * ffmpeg.av_q2d(ffmpeg.av_inv_q(_videoCodecContext->framerate));
                             ptsTime = _lastValidPtsTime + frameDuration;
@@ -1112,7 +1403,7 @@ namespace JonPlayer
                             _width = processedFrame->width;
                             _height = processedFrame->height;
                             _bgraBuffer = new byte[_width * _height * 4];
-                            _bgraBufferHandle = GCHandle.Alloc(_bgraBuffer, GCHandleType.Pinned);
+                            _bgraBufferHandle = System.Runtime.InteropServices.GCHandle.Alloc(_bgraBuffer, System.Runtime.InteropServices.GCHandleType.Pinned);
                             _bgraBufferPointer = _bgraBufferHandle.AddrOfPinnedObject();
                             
                             if (_swsContext != null)
@@ -1129,6 +1420,7 @@ namespace JonPlayer
                                 if (swFrame != null) ReturnFrame(swFrame);
                                 ReturnFrame(_videoFrame);
                                 _videoFrame = GetFrame();
+                                stopwatch.Reset();
                                 continue;
                             }
                             
@@ -1152,7 +1444,12 @@ namespace JonPlayer
                             }
                         }
 
-                        if (!stopwatch.IsRunning)
+                        if (_isPreBuffering)
+                        {
+                            currentPlaybackPtsTime = ptsTime;
+                        }
+
+                        if (!stopwatch.IsRunning && !_isPreBuffering)
                         {
                             stopwatch.Restart();
                             currentPlaybackPtsTime = ptsTime;
@@ -1162,11 +1459,12 @@ namespace JonPlayer
                         double systemClock = currentPlaybackPtsTime + elapsed;
                         double masterClockPtsTime = systemClock;
 
-                        if (_audioStreamIndex != -1 && GetAudioBufferedDurationMs != null && _lastValidAudioPtsTime > 0)
+                        if (_audioStreamIndex != -1 && GetAudioBufferedDurationMs != null && _lastValidAudioPtsTime > 0 && !_isSeekingAudio)
                         {
                             double bufferedMs = GetAudioBufferedDurationMs();
-                            double hwLatency = 100.0; // NAudio WaveOutEvent DesiredLatency
-                            double audioClock = _lastValidAudioPtsTime - (bufferedMs * _playbackSpeed) - hwLatency;
+                            SeekLog($"[SYNC] isSeekingAudio={_isSeekingAudio} lastAudioPts={_lastValidAudioPtsTime:F0} buffered={bufferedMs:F0} systemClock={systemClock:F0}");
+                            double hwLatency = GetAudioHardwareLatencyMs != null ? GetAudioHardwareLatencyMs() : 0.0;
+                            double audioClock = _lastValidAudioPtsTime - ((bufferedMs + hwLatency) * _playbackSpeed);
                             double diff = audioClock - systemClock;
 
                             if (diff > 2000 || diff < -2000)
@@ -1175,9 +1473,8 @@ namespace JonPlayer
                                 stopwatch.Restart();
                                 masterClockPtsTime = audioClock;
                             }
-                            else if (diff > 100 || diff < -100)
+                            else if (diff > 10 || diff < -10)
                             {
-                                // Pull System Clock smoothly towards Audio Clock
                                 currentPlaybackPtsTime += diff * 0.05;
                                 masterClockPtsTime = currentPlaybackPtsTime + stopwatch.ElapsedMilliseconds * _playbackSpeed;
                             }
@@ -1185,16 +1482,6 @@ namespace JonPlayer
 
                         double delay = ptsTime - masterClockPtsTime;
 
-                        _stats.SyncDelayMs = delay;
-                        _stats.VideoPts = _lastValidPtsTime;
-                        
-                        double audioPts = 0;
-                        if (_audioStreamIndex != -1 && GetAudioBufferedDurationMs != null && _lastValidAudioPtsTime > 0)
-                        {
-                            audioPts = _lastValidAudioPtsTime - GetAudioBufferedDurationMs();
-                        }
-                        _stats.AudioPts = audioPts;
-                        
                         if (delay < -30.0) _stats.LateFrames++;
                         if (delay < -100.0 && _playbackSpeed <= 2.0)
                         {
@@ -1237,6 +1524,18 @@ namespace JonPlayer
                             }
                         }
 
+                        double finalMasterClockPtsTime = currentPlaybackPtsTime + stopwatch.ElapsedMilliseconds * _playbackSpeed;
+                        _stats.SyncDelayMs = ptsTime - finalMasterClockPtsTime;
+                        _stats.VideoPts = _lastValidPtsTime;
+                        
+                        double audioPts = 0;
+                        if (_audioStreamIndex != -1 && GetAudioBufferedDurationMs != null && _lastValidAudioPtsTime > 0)
+                        {
+                            double hwLatency = GetAudioHardwareLatencyMs != null ? GetAudioHardwareLatencyMs() : 0.0;
+                            audioPts = _lastValidAudioPtsTime - ((GetAudioBufferedDurationMs() + hwLatency) * _playbackSpeed);
+                        }
+                        _stats.AudioPts = audioPts;
+
                         if (isD3D11Frame)
                         {
                             FrameDecoded?.Invoke(texturePtr, _width, _height, sliceIndex, true);
@@ -1262,7 +1561,6 @@ namespace JonPlayer
 
                             if (_swsContext == null)
                             {
-                                // sws_getContext failed — skip this frame
                                 if (swFrame != null) ReturnFrame(swFrame);
                                 ReturnFrame(_videoFrame);
                                 _videoFrame = GetFrame();
@@ -1309,6 +1607,8 @@ namespace JonPlayer
                             _videoFrame = GetFrame();
                         }
 
+                        if (_isFirstVideoFrame) _isFirstVideoFrame = false;
+
                         _framesDecodedThisSecond++;
                         
                         var now2 = DateTime.UtcNow;
@@ -1332,10 +1632,15 @@ namespace JonPlayer
                     }
                 }
             }
+            ThreadFinished();
         }
+
+        private int _isCleanedUp = 0;
 
         private void Cleanup()
         {
+            if (Interlocked.Exchange(ref _isCleanedUp, 1) == 1) return;
+
             if (_bgraBufferHandle.IsAllocated)
             {
                 _bgraBufferHandle.Free();
@@ -1427,7 +1732,16 @@ namespace JonPlayer
                 _formatContext = null;
             }
 
-            // Free pooled native objects to prevent memory leak
+            if (_audioFormatContext != null)
+            {
+                var f = _audioFormatContext;
+                ffmpeg.avformat_close_input(&f);
+                _audioFormatContext = null;
+            }
+
+            while (_videoPacketQueue.TryDequeue(out IntPtr p)) ReturnPacket((AVPacket*)p);
+            while (_audioPacketQueue.TryDequeue(out IntPtr p)) ReturnPacket((AVPacket*)p);
+
             while (_packetPool.TryTake(out IntPtr pooledPkt))
             {
                 var p = (AVPacket*)pooledPkt;
@@ -1438,23 +1752,34 @@ namespace JonPlayer
                 var f = (AVFrame*)pooledFrm;
                 ffmpeg.av_frame_free(&f);
             }
-
-            if (_bgraBufferHandle.IsAllocated)
-            {
-                _bgraBufferHandle.Free();
-            }
-
-            if (_audioBufferHandle.IsAllocated)
-            {
-                _audioBufferHandle.Free();
-            }
         }
+
+        private int _disposeState = 0;
 
         public void Dispose()
         {
-            if (_isDisposed) return;
-            Stop();
+            if (Interlocked.Exchange(ref _disposeState, 1) == 1) return;
             _isDisposed = true;
+
+            try { Stop(); } catch (Exception ex) { Logger.Error("Unhandled exception caught in FFmpegMediaDecoder empty catch block", ex); }
+
+            int waited = 0;
+            const int maxWaitMs = 5000;
+            while ((Interlocked.CompareExchange(ref _activeThreads, 0, 0) > 0 || Interlocked.CompareExchange(ref _isOpening, 0, 0) == 1) && waited < maxWaitMs)
+            {
+                Thread.Sleep(10);
+                waited += 10;
+            }
+
+            if (Interlocked.CompareExchange(ref _activeThreads, 0, 0) > 0 || Interlocked.CompareExchange(ref _isOpening, 0, 0) == 1)
+            {
+                Logger.Warn("Decoder dispose timed out while FFmpeg work is still active; cleanup deferred until decoder work exits.");
+                GC.SuppressFinalize(this);
+                return;
+            }
+
+            try { Cleanup(); } catch (Exception ex) { Logger.Error("Unhandled exception caught in FFmpegMediaDecoder empty catch block", ex); }
+
             GC.SuppressFinalize(this);
         }
     }

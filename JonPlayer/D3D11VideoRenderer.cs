@@ -30,12 +30,22 @@ namespace JonPlayer
         private IntPtr _sharedHandle;
         private bool _isDisposed;
         private volatile bool _isDirty;
+        private int _presentQueued;
         private readonly object _renderLock = new object();
+        private int _sourceFramesThisSecond;
+        private int _sourceFramesPerSecond;
+        private DateTime _lastSourceFpsUpdateTime = DateTime.UtcNow;
+        private int _presentedFramesThisSecond;
+        private int _skippedFramesThisSecond;
+        private DateTime _lastFpsUpdateTime = DateTime.UtcNow;
 
         public D3DImage D3DImage { get; } = new D3DImage();
 
         public int Width { get; private set; }
         public int Height { get; private set; }
+        public double PresentedFps { get; private set; }
+        public int RenderEventsPerSecond { get; private set; }
+        public int SkippedFramesPerSecond { get; private set; }
 
         private ID3D11VertexShader? _vertexShader;
         private ID3D11PixelShader? _pixelShader;
@@ -84,20 +94,95 @@ namespace JonPlayer
                 catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"D3D11VideoRenderer Initial Render Error: {ex.Message}"); }
             }
         }
+        private int _renderEvents;
+        private DateTime _lastStat = DateTime.UtcNow;
 
         private void OnRendering(object? sender, EventArgs e)
         {
-            if (_isDirty && D3DImage.IsFrontBufferAvailable)
+            _renderEvents++;
+
+            if ((DateTime.UtcNow - _lastStat).TotalSeconds >= 1)
             {
-                _isDirty = false;
+                RenderEventsPerSecond = _renderEvents;
+                _renderEvents = 0;
+                _lastStat = DateTime.UtcNow;
+            }
+
+            PresentPendingFrame();
+        }
+
+        private void QueuePresent()
+        {
+            if (_isDisposed || D3DImage.Dispatcher.HasShutdownStarted) return;
+            if (System.Threading.Interlocked.Exchange(ref _presentQueued, 1) == 1) return;
+
+            D3DImage.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Render,
+                new Action(PresentPendingFrame));
+        }
+
+        private void PresentPendingFrame()
+        {
+            System.Threading.Interlocked.Exchange(ref _presentQueued, 0);
+            if (!_isDirty || !D3DImage.IsFrontBufferAvailable) return;
+
+            lock (_renderLock)
+            {
+                if (!_isDirty || _isDisposed || !D3DImage.IsFrontBufferAvailable) return;
+
                 try
                 {
                     D3DImage.Lock();
-                    try { D3DImage.AddDirtyRect(new Int32Rect(0, 0, Width, Height)); }
-                    finally { D3DImage.Unlock(); }
+
+                    try
+                    {
+                        D3DImage.AddDirtyRect(
+                            new Int32Rect(0, 0, Width, Height));
+                    }
+                    finally
+                    {
+                        D3DImage.Unlock();
+                    }
+
+                    _isDirty = false;
+                    _presentedFramesThisSecond++;
+                    UpdatePresentationStats();
                 }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"D3D11VideoRenderer Render Loop Error: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"D3D11VideoRenderer Present Error: {ex.Message}");
+                }
             }
+        }
+
+        private void UpdateSourceFrameRate()
+        {
+            _sourceFramesThisSecond++;
+
+            var now = DateTime.UtcNow;
+            if ((now - _lastSourceFpsUpdateTime).TotalMilliseconds < 1000) return;
+
+            _sourceFramesPerSecond = _sourceFramesThisSecond;
+            _sourceFramesThisSecond = 0;
+            _lastSourceFpsUpdateTime = now;
+        }
+
+        private bool ShouldQueueImmediatePresent()
+        {
+            return _sourceFramesPerSecond >= 50 || _sourceFramesThisSecond >= 45;
+        }
+
+        private void UpdatePresentationStats()
+        {
+            var now = DateTime.UtcNow;
+            if ((now - _lastFpsUpdateTime).TotalMilliseconds < 1000) return;
+
+            PresentedFps = _presentedFramesThisSecond;
+            SkippedFramesPerSecond = _skippedFramesThisSecond;
+            _presentedFramesThisSecond = 0;
+            _skippedFramesThisSecond = 0;
+            _lastFpsUpdateTime = now;
         }
 
         private void InitializeD3D()
@@ -353,8 +438,7 @@ namespace JonPlayer
             lock (_renderLock)
             {
                 if (_isDisposed || _d3d11Context == null || _renderTargetView == null) return;
-                
-                if (_isDirty) return; 
+                UpdateSourceFrameRate();
 
                 try
                 {
@@ -374,6 +458,7 @@ namespace JonPlayer
                         _d3d11Context.Flush();
                     }
                     _isDirty = true;
+                    if (ShouldQueueImmediatePresent()) QueuePresent();
                 }
                 catch (Exception ex)
                 {
@@ -406,7 +491,7 @@ namespace JonPlayer
                         Height = (uint)trueHeight,
                         MipLevels = 1,
                         ArraySize = 1,
-                        Format = DXGIFormat.NV12,
+                        Format = desc.Format,
                         Usage = ResourceUsage.Default,
                         BindFlags = BindFlags.ShaderResource,
                         SampleDescription = new SampleDescription(1, 0)
@@ -414,13 +499,13 @@ namespace JonPlayer
 
                     var srvDescY = new ShaderResourceViewDescription
                     {
-                        Format = DXGIFormat.R8_UNorm,
+                        Format = desc.Format == DXGIFormat.P010 ? DXGIFormat.R16_UNorm : DXGIFormat.R8_UNorm,
                         ViewDimension = ShaderResourceViewDimension.Texture2D,
                         Texture2D = new Texture2DShaderResourceView { MostDetailedMip = 0, MipLevels = 1 }
                     };
                     var srvDescUV = new ShaderResourceViewDescription
                     {
-                        Format = DXGIFormat.R8G8_UNorm,
+                        Format = desc.Format == DXGIFormat.P010 ? DXGIFormat.R16G16_UNorm : DXGIFormat.R8G8_UNorm,
                         ViewDimension = ShaderResourceViewDimension.Texture2D,
                         Texture2D = new Texture2DShaderResourceView { MostDetailedMip = 0, MipLevels = 1 }
                     };
@@ -449,7 +534,6 @@ namespace JonPlayer
 
                 // Atomic copy to the shared texture to prevent WPF tearing
                 _d3d11Context.CopyResource(_d3d11Texture, _d3d11OffscreenTexture);
-                _d3d11Context.Flush();
             }
             catch (Exception ex)
             {
