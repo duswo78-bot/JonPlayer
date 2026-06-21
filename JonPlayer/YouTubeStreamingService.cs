@@ -196,7 +196,7 @@ namespace JonPlayer
                 cancellationToken);
         }
 
-        private static async Task<string> EnsureFFmpegCliAsync(CancellationToken cancellationToken)
+        public static async Task<string> EnsureFFmpegCliAsync(CancellationToken cancellationToken = default)
         {
             string ffmpegDirectory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

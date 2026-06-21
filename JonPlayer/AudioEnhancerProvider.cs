@@ -11,6 +11,12 @@ namespace JonPlayer
         private readonly BiQuadFilter[] _trebleFilters;  // High Shelf : 고음 선명도
         
         public bool IsEnhancerEnabled { get; set; } = true;
+        
+        /// <summary>
+        /// Base multiplier applied to the volume before soft clipping (used for automatic volume normalization).
+        /// Default is 1.0f (no change).
+        /// </summary>
+        public float BaselineVolumeMultiplier { get; set; } = 1.0f;
 
         public WaveFormat WaveFormat => _source.WaveFormat;
 
@@ -38,6 +44,13 @@ namespace JonPlayer
 
             if (!IsEnhancerEnabled || _source.WaveFormat.Channels != 2)
             {
+                if (BaselineVolumeMultiplier != 1.0f)
+                {
+                    for (int i = 0; i < samplesRead; i++)
+                    {
+                        buffer[offset + i] *= BaselineVolumeMultiplier;
+                    }
+                }
                 return samplesRead;
             }
 
@@ -45,6 +58,10 @@ namespace JonPlayer
             {
                 float left  = buffer[offset + i];
                 float right = buffer[offset + i + 1];
+
+                // Apply baseline volume multiplier before any processing
+                left *= BaselineVolumeMultiplier;
+                right *= BaselineVolumeMultiplier;
 
                 // [1단계] EQ : Low Shelf → High Shelf 순서로 직렬 적용
                 left  = _trebleFilters[0].Transform(_bassFilters[0].Transform(left));

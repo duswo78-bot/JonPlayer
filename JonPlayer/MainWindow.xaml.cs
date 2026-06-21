@@ -1692,9 +1692,15 @@ namespace JonPlayer
                     newDecoder.Dispose();
                     return;
                 }
+
                 
                 _decoder = newDecoder;
                 InitAudioPlayer();
+                
+                if (!isUrl && _decoder.DurationSeconds > 10.0)
+                {
+                    _ = RunRandomIntervalVolumeScanAsync(path, _decoder.DurationSeconds);
+                }
                 
                 Dispatcher.Invoke(() => {
                     if (VideoElement != null && _decoder != null)
@@ -1854,6 +1860,88 @@ namespace JonPlayer
                     StopStreamingLoadingBlink();
                     _isOpeningFile = false;
                 }
+            }
+        }
+
+        private async Task RunRandomIntervalVolumeScanAsync(string filePath, double durationSeconds)
+        {
+            try
+            {
+                if (_audioEnhancer == null) return;
+                
+                string ffmpegPath = await YouTubeStreamingService.EnsureFFmpegCliAsync();
+                
+                int numSamples = 5;
+                double sampleDuration = 5.0;
+                if (durationSeconds < 30.0)
+                {
+                    numSamples = 1;
+                    sampleDuration = durationSeconds;
+                }
+
+                var random = new Random();
+                var tasks = new System.Collections.Generic.List<Task<double>>();
+
+                for (int i = 0; i < numSamples; i++)
+                {
+                    double startTime = 0.0;
+                    if (numSamples > 1)
+                    {
+                        startTime = random.NextDouble() * (durationSeconds - sampleDuration);
+                    }
+
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        using var process = new System.Diagnostics.Process();
+                        process.StartInfo.FileName = ffmpegPath;
+                        process.StartInfo.Arguments = "-ss " + startTime.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + " -t " + sampleDuration.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + " -i \"" + filePath + "\" -vn -af volumedetect -f null -";
+                        process.StartInfo.UseShellExecute = false;
+                        process.StartInfo.RedirectStandardError = true;
+                        process.StartInfo.CreateNoWindow = true;
+
+                        process.Start();
+                        string stderr = await process.StandardError.ReadToEndAsync();
+                        await process.WaitForExitAsync();
+
+                        var match = System.Text.RegularExpressions.Regex.Match(stderr, @"max_volume:\s*([\-\d\.]+)\s*dB");
+                        if (match.Success && double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double maxVol))
+                        {
+                            return maxVol;
+                        }
+                        return -99.0;
+                    }));
+                }
+
+                var results = await Task.WhenAll(tasks);
+                
+                double maxPeak = -99.0;
+                foreach (var res in results)
+                {
+                    if (res > maxPeak) maxPeak = res;
+                }
+                
+                if (maxPeak > -90.0) 
+                {
+                    double targetPeak = -0.3;
+                    double gainDb = targetPeak - maxPeak;
+                    
+                    if (gainDb > 20.0) gainDb = 20.0;
+                    
+                    float multiplier = (float)Math.Pow(10, gainDb / 20.0);
+                    
+                    Dispatcher.Invoke(() =>
+                    {
+                        if (_audioEnhancer != null)
+                        {
+                            _audioEnhancer.BaselineVolumeMultiplier = multiplier;
+                            Logger.Info($"[VolumeNormalizer] Max peak: {maxPeak:F1}dB. Set Baseline Gain to {gainDb:F1}dB (Multiplier: {multiplier:F2}x)");
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to run random interval volume scan", ex);
             }
         }
 
