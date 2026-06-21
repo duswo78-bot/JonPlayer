@@ -116,6 +116,23 @@ namespace JonPlayer
         {
             if (_overlayWindow == null || _isFullscreen || this.WindowState == WindowState.Minimized) return;
 
+            try
+            {
+                var source = PresentationSource.FromVisual(this);
+                if (source != null && source.CompositionTarget != null)
+                {
+                    Point screenTopLeft = this.PointToScreen(new Point(0, 0));
+                    Point logicalTopLeft = source.CompositionTarget.TransformFromDevice.Transform(screenTopLeft);
+
+                    _overlayWindow.Left = logicalTopLeft.X;
+                    _overlayWindow.Top = logicalTopLeft.Y;
+                    _overlayWindow.Width = this.ActualWidth > 0 ? this.ActualWidth : this.Width;
+                    _overlayWindow.Height = this.ActualHeight > 0 ? this.ActualHeight : this.Height;
+                    return;
+                }
+            }
+            catch (InvalidOperationException) { }
+
             _overlayWindow.Left = this.Left;
             _overlayWindow.Top = this.Top;
             _overlayWindow.Width = this.ActualWidth > 0 ? this.ActualWidth : this.Width;
@@ -126,7 +143,7 @@ namespace JonPlayer
         {
             if (msg == 0x0047 && _overlayWindow != null) // WM_WINDOWPOSCHANGED only
             {
-                Dispatcher.BeginInvoke(SyncOverlayWindowToMainWindow, System.Windows.Threading.DispatcherPriority.Render);
+                Dispatcher.BeginInvoke(SyncOverlayWindowToMainWindow, System.Windows.Threading.DispatcherPriority.Send);
             }
             return IntPtr.Zero;
         }
