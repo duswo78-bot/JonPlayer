@@ -79,6 +79,38 @@ sequenceDiagram
     M->>M: UI cleared, Subtitle hidden, Slider reset
   </div>
 
+  <h2>Streaming, AI Subtitle & Save Flow</h2>
+  <div class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant M as MainWindow
+    participant Y as YouTubeStreamingService
+    participant D as FFmpegDecoder
+    participant W as WhisperExtractor
+    participant S as SubtitleManager
+
+    %% Streaming Flow
+    U->>M: Paste YouTube URL / Play
+    M->>Y: GetStreamUrlAsync(url)
+    Y->>Y: YoutubeExplode get manifest
+    Y-->>M: Return Muxed or Adaptive URLs
+    M->>D: PlayFile with extracted URLs
+
+    %% AI Subtitle Flow
+    U->>M: Click CC+ (AI Subtitle)
+    M->>W: ExtractSubtitlesAsync(audioPath)
+    W->>W: Run Python Whisper model process
+    W-->>S: onSubtitleGenerated callback
+    S->>M: Parsed SRT blocks mapped to time
+    M->>M: Display AI subtitles dynamically
+
+    %% Save Video Flow
+    U->>M: Click Save Video
+    M->>Y: DownloadBestVideoAsync(url, savePath)
+    Y->>Y: FFmpeg Download & Mux
+    Y-->>M: Download Complete
+  </div>
+
   <script>mermaid.initialize({ startOnLoad:true, theme: 'default' });</script>
 </body>
 </html>
