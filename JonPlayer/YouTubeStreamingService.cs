@@ -73,7 +73,23 @@ namespace JonPlayer
                 LastAudioUrl = null;
                 var streamManifest = await _youtube.Videos.Streams.GetManifestAsync(url);
                 
-                // Prefer adaptive streams for high quality. Streaming seek is handled by reopening both streams at the target.
+                // Prefer muxed streams for live playback stability. Adaptive video-only URLs can fail independently,
+                // leaving the separate audio stream playing with no rendered video.
+                var muxedStreamInfo = streamManifest.GetMuxedStreams()
+                    .Where(s => s.VideoQuality.MaxHeight <= 1080)
+                    .OrderByDescending(s => s.VideoQuality)
+                    .FirstOrDefault() ??
+                    streamManifest.GetMuxedStreams()
+                        .OrderByDescending(s => s.VideoQuality)
+                        .FirstOrDefault();
+
+                if (muxedStreamInfo != null)
+                {
+                    Logger.Info($"YouTube muxed playback: video={muxedStreamInfo.VideoQuality} ({muxedStreamInfo.Container.Name}), bitrate={muxedStreamInfo.Bitrate}");
+                    return muxedStreamInfo.Url;
+                }
+
+                // Fallback to adaptive only when no muxed stream is available.
                 var videoStreamInfo = streamManifest.GetVideoOnlyStreams()
                     .Where(s => s.VideoQuality.MaxHeight <= 1080)
                     .OrderByDescending(s => s.VideoQuality)
@@ -88,16 +104,6 @@ namespace JonPlayer
                     LastAudioUrl = audioStreamInfo.Url;
                     Logger.Info($"YouTube adaptive: video={videoStreamInfo.VideoQuality} ({videoStreamInfo.Container.Name}), audio={audioStreamInfo.Bitrate} ({audioStreamInfo.Container.Name})");
                     return videoStreamInfo.Url;
-                }
-
-                var muxedStreamInfo = streamManifest.GetMuxedStreams()
-                    .OrderByDescending(s => s.VideoQuality)
-                    .FirstOrDefault();
-
-                if (muxedStreamInfo != null)
-                {
-                    Logger.Info($"YouTube muxed fallback: video={muxedStreamInfo.VideoQuality} ({muxedStreamInfo.Container.Name}), bitrate={muxedStreamInfo.Bitrate}");
-                    return muxedStreamInfo.Url;
                 }
 
                 return null;

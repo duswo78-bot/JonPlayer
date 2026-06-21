@@ -10,6 +10,7 @@
         Foreground="{DynamicResource TextBrush}"
         WindowStyle="None"
         AllowsTransparency="False"
+        ResizeMode="CanResize"
         AllowDrop="True"
         DragOver="Window_DragOver"
         Drop="Window_Drop"
@@ -19,8 +20,10 @@
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="40"
                       ResizeBorderThickness="6"
-                      GlassFrameThickness="1"
-                      CornerRadius="0"/>
+                      GlassFrameThickness="0,0,0,1"
+                      UseAeroCaptionButtons="False"
+                      CornerRadius="0"
+                      NonClientFrameEdges="None"/>
     </WindowChrome.WindowChrome>
 
     <Window.Resources>
@@ -542,7 +545,7 @@
         </Style>
     </Window.Resources>
 
-    <Grid x:Name="MainGrid" Background="Black">
+    <Grid x:Name="MainGrid" Background="Black" MouseEnter="MainGrid_MouseEnter" MouseLeave="MainGrid_MouseLeave">
         <Grid.RowDefinitions>
             <RowDefinition x:Name="RowTitleBar" Height="40"/>
             <RowDefinition Height="*"/>
@@ -582,7 +585,7 @@
             </Grid>
         </Border>
 
-        <Grid x:Name="VideoGrid" Grid.Row="1" Background="Black">
+        <Grid x:Name="VideoGrid" Grid.Row="1" Background="Transparent">
             <!-- Viewbox corrects aspect ratio when video is rotated 90°/270° -->
             <Viewbox x:Name="VideoViewbox" Stretch="Uniform" Visibility="Collapsed">
                 <Image x:Name="VideoElement" Stretch="Uniform" RenderTransformOrigin="0.5,0.5">
@@ -594,6 +597,7 @@
                     </Image.RenderTransform>
                 </Image>
             </Viewbox>
+            <Rectangle x:Name="SplashBackground" Fill="Black" Visibility="{Binding Visibility, ElementName=ImgSplash}"/>
             <Image x:Name="ImgSplash" Stretch="None" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
             <Image x:Name="ImgYoutubeThumbnail" Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed"/>
 
@@ -633,7 +637,11 @@
                 </Grid>
             </Grid>
 
-            <Rectangle x:Name="MouseLayer" Fill="Transparent" IsHitTestVisible="True" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
+            <Rectangle x:Name="MouseLayer" Fill="#01000000" IsHitTestVisible="True" Margin="6" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
+
+            <Button x:Name="BtnPlayPausePip" HorizontalAlignment="Center" VerticalAlignment="Center" Width="56" Height="56" Style="{StaticResource KnobButton}" ToolTip="Play/Pause" Click="BtnPlayPause_Click" Visibility="Collapsed" Panel.ZIndex="90">
+                <Path x:Name="PlayPauseIconPathPip" Data="{StaticResource PlayIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="22" Height="22" Stretch="Uniform"/>
+            </Button>
 
             <!-- Subtitle UI -->
             <Border x:Name="SubtitleBorder" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="20,0,20,20" Background="#A0000000" CornerRadius="8" Padding="16,8" IsHitTestVisible="True" Panel.ZIndex="50" Visibility="Collapsed" MouseLeftButtonDown="SubtitleBorder_MouseLeftButtonDown" MouseLeftButtonUp="SubtitleBorder_MouseLeftButtonUp" MouseMove="SubtitleBorder_MouseMove" Cursor="SizeAll">
@@ -1377,14 +1385,14 @@
 
         <Border Grid.Row="3" x:Name="ControlBar" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="0,1,0,0" Padding="0">
             <Viewbox Stretch="Uniform" StretchDirection="DownOnly" HorizontalAlignment="Stretch">
-                <Grid Width="{Binding ActualWidth, ElementName=ControlBar}" MinWidth="800">
+                <Grid x:Name="ControlBarGrid" Width="{Binding ActualWidth, ElementName=ControlBar}" MinWidth="800">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="1*" MinWidth="280" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="1*" MinWidth="250" />
                     </Grid.ColumnDefinitions>
                     
-                    <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="14,8,0,8">
+                    <StackPanel x:Name="ControlBarLeftPanel" Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="14,8,0,8">
                         <Button Style="{StaticResource KnobButton}" ToolTip="Open File (Ctrl+O)" Click="BtnOpen_Click" Margin="0,0,8,0">
                             <Path Data="{StaticResource OpenIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                         </Button>
@@ -1429,7 +1437,7 @@
                         <TextBlock x:Name="TxtWhisperProgress" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                     </StackPanel>
                     
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,8">
+                    <StackPanel x:Name="ControlBarCenterPanel" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,8">
                         <Button Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,6,0">
                             <Path Data="{StaticResource PrevIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                         </Button>
@@ -1450,7 +1458,7 @@
                         </Button>
                     </StackPanel>
                     
-                    <Grid Grid.Column="2" HorizontalAlignment="Stretch" VerticalAlignment="Center" Margin="0,8,14,8">
+                    <Grid x:Name="ControlBarRightPanel" Grid.Column="2" HorizontalAlignment="Stretch" VerticalAlignment="Center" Margin="0,8,14,8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="1*" />
                             <ColumnDefinition Width="Auto" />
