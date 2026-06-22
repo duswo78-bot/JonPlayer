@@ -1281,6 +1281,7 @@
                                     </ControlTemplate>
                                 </Button.Template>
                             </Button>
+                            <Button x:Name="BtnTranslateFS" Style="{StaticResource TextToggleButton}" Content="KR" Click="BtnTranslate_Click" Margin="0,0,8,0" ToolTip="Translate Subtitles" Height="20" VerticalAlignment="Center" Visibility="Collapsed" FontSize="10" Foreground="#888888"/>
                             <TextBlock x:Name="TxtWhisperProgressFS" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                         </StackPanel>
                         
@@ -1434,6 +1435,7 @@
                                 </ControlTemplate>
                             </Button.Template>
                         </Button>
+                        <Button x:Name="BtnTranslate" Style="{StaticResource TextToggleButton}" Content="KR" Click="BtnTranslate_Click" Margin="0,0,8,0" ToolTip="Translate Subtitles" Height="20" VerticalAlignment="Center" Visibility="Collapsed" FontSize="10" Foreground="#888888"/>
                         <TextBlock x:Name="TxtWhisperProgress" Text="" Foreground="{DynamicResource ToggleOnBrush}" FontSize="11" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                     </StackPanel>
                     

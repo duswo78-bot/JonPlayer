@@ -68,6 +68,25 @@ namespace JonPlayer
 
         public bool HasSubtitles => _subtitles != null && _subtitles.Count > 0;
 
+        public string DetectLanguage()
+        {
+            if (!HasSubtitles) return "KR";
+
+            int checkCount = Math.Min(50, _subtitles.Count);
+            for (int i = 0; i < checkCount; i++)
+            {
+                if (_subtitles[i].Lines == null) continue;
+                foreach (var line in _subtitles[i].Lines)
+                {
+                    if (line.Any(ch => ch >= '\uac00' && ch <= '\ud7a3'))
+                    {
+                        return "KR";
+                    }
+                }
+            }
+            return "EN";
+        }
+
         public string GetSubtitleText(int timeMs)
         {
             if (!HasSubtitles) return string.Empty;

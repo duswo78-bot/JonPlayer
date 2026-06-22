@@ -105,6 +105,22 @@ namespace JonPlayer
             if (Math.Abs(this.Width - targetWidth) > 1.0) this.Width = targetWidth;
             if (Math.Abs(this.Height - targetHeight) > 1.0) this.Height = targetHeight;
         }
+        private void UpdateVideoMargin()
+        {
+            if (_videoHwndHost == null) return;
+            if (_isFullscreen || _isPipMode)
+            {
+                _videoHwndHost.Margin = new System.Windows.Thickness(0);
+
+            }
+            else
+            {
+                double top = RowTitleBar.ActualHeight > 0 ? RowTitleBar.ActualHeight : 40;
+                double bottom = (RowTimeline.ActualHeight + RowControls.ActualHeight) > 0 ? (RowTimeline.ActualHeight + RowControls.ActualHeight) : 75;
+                _videoHwndHost.Margin = new System.Windows.Thickness(0, top, 0, bottom);
+
+            }
+        }
 
         private void SyncOverlayWindowToMainWindow()
         {
@@ -127,6 +143,8 @@ namespace JonPlayer
             if (Math.Abs(_overlayWindow.Top - targetTop) > 1.0) _overlayWindow.Top = targetTop;
             if (Math.Abs(_overlayWindow.Width - targetWidth) > 1.0) _overlayWindow.Width = targetWidth;
             if (Math.Abs(_overlayWindow.Height - targetHeight) > 1.0) _overlayWindow.Height = targetHeight;
+            
+            UpdateVideoMargin();
         }
 
         private void BeginMainWindowDrag()
@@ -333,6 +351,26 @@ namespace JonPlayer
         private Window? _overlayWindow;
         private VideoHwndHost? _videoHwndHost;
 
+        private void UpdateSubtitleLanguage()
+        {
+            if (_subtitleManager.HasSubtitles)
+            {
+                string lang = _subtitleManager.DetectLanguage();
+                string displayLang = _isTranslationEnabled ? (lang == "KR" ? "EN" : "KR") : lang;
+                Dispatcher.Invoke(() => {
+                    if (BtnTranslate != null) BtnTranslate.Content = displayLang;
+                    if (BtnTranslateFS != null) BtnTranslateFS.Content = displayLang;
+                });
+            }
+            else
+            {
+                Dispatcher.Invoke(() => {
+                    if (BtnTranslate != null) BtnTranslate.Content = "KR";
+                    if (BtnTranslateFS != null) BtnTranslateFS.Content = "KR";
+                });
+            }
+        }
+
         public MainWindow()
         {
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -379,6 +417,12 @@ namespace JonPlayer
                 {
                     this.Cursor = System.Windows.Input.Cursors.None;
                     if (_overlayWindow != null) _overlayWindow.Cursor = System.Windows.Input.Cursors.None;
+                    if (_videoHwndHost != null) _videoHwndHost.HideCursor = true;
+                    if (_isFullscreen)
+                    {
+                        FsBottomStrip.Visibility = Visibility.Collapsed;
+                        HideFsExitBadge();
+                    }
                 }
                 _cursorHideTimer.Stop();
             };
@@ -637,10 +681,39 @@ namespace JonPlayer
                 // Subtitle Update
                 if (_subtitlesEnabled && _subtitleManager.HasSubtitles)
                 {
+                    if (BtnTranslate.Visibility != Visibility.Visible)
+                    {
+                        BtnTranslate.Visibility = Visibility.Visible;
+                        if (BtnTranslateFS != null) BtnTranslateFS.Visibility = Visibility.Visible;
+                    }
+
                     string subText = _subtitleManager.GetSubtitleText((int)current.TotalMilliseconds);
                     if (!string.IsNullOrEmpty(subText))
                     {
-                        TxtSubtitle.Text = subText;
+                        string detectedLang = _subtitleManager.DetectLanguage();
+                        string displayLang = _isTranslationEnabled ? (detectedLang == "KR" ? "EN" : "KR") : detectedLang;
+                        if (BtnTranslate.Content?.ToString() != displayLang)
+                        {
+                            BtnTranslate.Content = displayLang;
+                            if (BtnTranslateFS != null) BtnTranslateFS.Content = displayLang;
+                        }
+
+                        if (_isTranslationEnabled)
+                        {
+                            if (_translationCache.TryGetValue(subText, out string translated))
+                            {
+                                TxtSubtitle.Text = translated;
+                            }
+                            else
+                            {
+                                TxtSubtitle.Text = subText;
+                                _ = FetchAndApplyTranslationAsync(subText, (int)current.TotalMilliseconds);
+                            }
+                        }
+                        else
+                        {
+                            TxtSubtitle.Text = subText;
+                        }
                         SubtitleBorder.Visibility = Visibility.Visible;
                     }
                     else
@@ -650,6 +723,14 @@ namespace JonPlayer
                 }
                 else
                 {
+                    if (BtnTranslate.Visibility == Visibility.Visible)
+                    {
+                        BtnTranslate.Visibility = Visibility.Collapsed;
+                        if (BtnTranslateFS != null) BtnTranslateFS.Visibility = Visibility.Collapsed;
+                        _isTranslationEnabled = false;
+                        BtnTranslate.Tag = null;
+                        if (BtnTranslateFS != null) BtnTranslateFS.Tag = null;
+                    }
                     SubtitleBorder.Visibility = Visibility.Collapsed;
                 }
 
@@ -1434,6 +1515,7 @@ namespace JonPlayer
         {
             if (this.Cursor != System.Windows.Input.Cursors.Arrow) this.Cursor = System.Windows.Input.Cursors.Arrow;
             if (_overlayWindow != null && _overlayWindow.Cursor != System.Windows.Input.Cursors.Arrow) _overlayWindow.Cursor = System.Windows.Input.Cursors.Arrow;
+            if (_videoHwndHost != null && _videoHwndHost.HideCursor) _videoHwndHost.HideCursor = false;
             _cursorHideTimer.Stop();
             _cursorHideTimer.Start();
         }
@@ -2397,6 +2479,12 @@ namespace JonPlayer
         private bool _subtitlesEnabled = false;
         private int _subtitleLoadGeneration;
 
+        // Translation logic
+        private bool _isTranslationEnabled = false;
+        private Dictionary<string, string> _translationCache = new Dictionary<string, string>();
+        private HashSet<string> _translatingSet = new HashSet<string>();
+        private static readonly System.Net.Http.HttpClient _translateHttpClient = new System.Net.Http.HttpClient();
+
         private void StartRainbowBlink(System.Windows.Controls.TextBlock target)
         {
             if (target == null) return;
@@ -2770,6 +2858,7 @@ namespace JonPlayer
                     {
                         // 자막 파일 먼저 로드하여 화면에 확실히 적용
                         _subtitleManager.LoadSubtitle(srtPathResult);
+                        UpdateSubtitleLanguage();
 
                         // 100% -> Complete! 표시 (전체 추출 완료 후 한 번만)
                         TxtWhisperProgress.Visibility = Visibility.Visible;
@@ -3350,6 +3439,76 @@ namespace JonPlayer
 
         private bool _isFitScreen = false;
         private Rect _backupNormalBounds;
+
+        private async void BtnTranslate_Click(object sender, RoutedEventArgs e)
+        {
+            _isTranslationEnabled = !_isTranslationEnabled;
+            BtnTranslate.Tag = null;
+            if (BtnTranslateFS != null) BtnTranslateFS.Tag = null;
+            
+            if (_subtitleManager.HasSubtitles)
+            {
+                string detectedLang = _subtitleManager.DetectLanguage();
+                string displayLang = _isTranslationEnabled ? (detectedLang == "KR" ? "EN" : "KR") : detectedLang;
+                BtnTranslate.Content = displayLang;
+                if (BtnTranslateFS != null) BtnTranslateFS.Content = displayLang;
+            }
+        }
+
+        private async System.Threading.Tasks.Task FetchAndApplyTranslationAsync(string text, int timeMs)
+        {
+            if (_translationCache.ContainsKey(text) || _translatingSet.Contains(text)) return;
+            _translatingSet.Add(text);
+
+            string translated = await GetTranslatedSubtitleAsync(text);
+            _translationCache[text] = translated;
+            _translatingSet.Remove(text);
+
+            Dispatcher.Invoke(() => {
+                if (_isTranslationEnabled && _subtitlesEnabled && TxtSubtitle.Text == text)
+                {
+                    TxtSubtitle.Text = translated; 
+                }
+            });
+        }
+
+        private async System.Threading.Tasks.Task<string> GetTranslatedSubtitleAsync(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return text;
+            
+            try
+            {
+                bool isKorean = System.Text.RegularExpressions.Regex.IsMatch(text, @"[가-힣]");
+                string tl = isKorean ? "en" : "ko";
+                
+
+
+                string url = $"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={tl}&dt=t&q={Uri.EscapeDataString(text)}";
+                
+                string json = await _translateHttpClient.GetStringAsync(url);
+                using (System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json))
+                {
+                    if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+                    {
+                        var sentences = doc.RootElement[0];
+                        if (sentences.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                            foreach (var sentence in sentences.EnumerateArray())
+                            {
+                                if (sentence.ValueKind == System.Text.Json.JsonValueKind.Array && sentence.GetArrayLength() > 0)
+                                {
+                                    sb.Append(sentence[0].GetString());
+                                }
+                            }
+                            return sb.ToString();
+                        }
+                    }
+                }
+            }
+            catch { }
+            return text;
+        }
 
         private void FitScreen()
         {
@@ -4004,9 +4163,9 @@ namespace JonPlayer
             sb.AppendLine($"{"CPU".PadRight(12)}{cpuUsage:F1}%");
             sb.AppendLine($"{"Memory".PadRight(12)}{memoryMb:F0} MB");
             sb.AppendLine($"{"Threads".PadRight(12)}{totalThreads}");
-            if (_audioEnhancer != null && _audioEnhancer.BaselineVolumeMultiplier != 1.0f)
+            if (_audioEnhancer != null)
             {
-                double gainDb = 20 * Math.Log10(_audioEnhancer.BaselineVolumeMultiplier);
+                double gainDb = 20 * Math.Log10(Math.Max(0.0001, _audioEnhancer.BaselineVolumeMultiplier));
                 sb.AppendLine($"{"Audio Gain".PadRight(12)}{gainDb:+0.0;-0.0;0.0} dB");
             }
             sb.AppendLine();

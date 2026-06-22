@@ -57,6 +57,11 @@ public class VideoHwndHost : HwndHost
 
 	public event EventHandler? MouseDoubleClick;
 
+	[DllImport("user32.dll")]
+	private static extern IntPtr SetCursor(IntPtr hCursor);
+
+	public bool HideCursor { get; set; } = false;
+
 	[DllImport("user32.dll", CharSet = CharSet.Unicode)]
 	internal static extern IntPtr CreateWindowEx(int dwExStyle, string lpszClassName, string lpszWindowName, int style, int x, int y, int width, int height, IntPtr hwndParent, IntPtr hMenu, IntPtr hInst, IntPtr pvParam);
 
@@ -108,6 +113,14 @@ public class VideoHwndHost : HwndHost
 		case 20:
 			handled = true;
 			return new IntPtr(1);
+		case 32:
+			if (HideCursor)
+			{
+				SetCursor(IntPtr.Zero);
+				handled = true;
+				return new IntPtr(1);
+			}
+			break;
 		case 15:
 		{
 			PAINTSTRUCT lpPaint;
