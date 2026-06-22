@@ -1,0 +1,1029 @@
+﻿commit d32e7bc28f3734cbb584dd3c2909b825a77a5045
+Author: Park <yeon.jae.park@aptiv.com>
+Date:   Sun Jun 21 21:46:23 2026 +0900
+
+    Fix PiP resizing, fullscreen enter bug, and stats overlay layout size bug
+
+diff --git a/JonPlayer/MainWindow.xaml.cs b/JonPlayer/MainWindow.xaml.cs
+index c22b0e0..2020dbc 100644
+--- a/JonPlayer/MainWindow.xaml.cs
++++ b/JonPlayer/MainWindow.xaml.cs
+@@ -82,7 +82,54 @@ namespace JonPlayer
+     }
+ 
+     public partial class MainWindow : Window
+-    {
++{
++        [DllImport("user32.dll")]
++        public static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
++
++        [DllImport("user32.dll")]
++        private static extern bool ReleaseCapture();
++
++
++        private bool _mainWindowSyncHookAttached;
++
++        private void BeginMainWindowDrag()
++        {
++            var handle = new WindowInteropHelper(this).Handle;
++            if (handle == IntPtr.Zero) return;
++
++            ReleaseCapture();
++            _ = SendMessage(handle, 0xA1, 2, 0); // WM_NCLBUTTONDOWN, HTCAPTION
++        }
++
++        private void AttachMainWindowSyncHook()
++        {
++            if (_mainWindowSyncHookAttached) return;
++
++            var handle = new WindowInteropHelper(this).Handle;
++            if (handle == IntPtr.Zero) return;
++
++            HwndSource.FromHwnd(handle)?.AddHook(MainWindowSyncHook);
++            _mainWindowSyncHookAttached = true;
++        }
++
++        private void SyncOverlayWindowToMainWindow()
++        {
++            if (_overlayWindow == null || _isFullscreen || this.WindowState == WindowState.Minimized) return;
++
++            _overlayWindow.Left = this.Left;
++            _overlayWindow.Top = this.Top;
++            _overlayWindow.Width = this.ActualWidth > 0 ? this.ActualWidth : this.Width;
++            _overlayWindow.Height = this.ActualHeight > 0 ? this.ActualHeight : this.Height;
++        }
++
++        private IntPtr MainWindowSyncHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
++        {
++            if (msg == 0x0047 && _overlayWindow != null) // WM_WINDOWPOSCHANGED only
++            {
++                Dispatcher.BeginInvoke(SyncOverlayWindowToMainWindow, System.Windows.Threading.DispatcherPriority.Render);
++            }
++            return IntPtr.Zero;
++        }
+         private D3D11VideoRenderer? _renderer;
+         private FFmpegMediaDecoder? _decoder;
+         
+@@ -94,10 +141,13 @@ namespace JonPlayer
+         private bool _isUserDraggingSlider;
+         private bool _isUpdatingFromPlayer;
+         private bool _isSeeking;
++        private bool _suppressTimelineSeek;
+         private int _streamingSeekGeneration;
+         private int _openGeneration;
+         private bool _isClosing;
+         private long _lastFrameTicks;
++        private double _initialWidth;
++        private double _initialHeight;
+         private long _lastAudioTicks;
+ 
+         private int   _lastVolume    = 80;
+@@ -271,13 +321,21 @@ namespace JonPlayer
+             }
+         }
+ 
++        private Window? _overlayWindow;
++        private VideoHwndHost? _videoHwndHost;
++
+         public MainWindow()
+         {
+-            InitializeComponent();
++            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
++            timeBeginPeriod(1);
++            try { InitializeComponent(); } catch (Exception ex) { System.IO.File.WriteAllText("crash.txt", ex.ToString()); throw; }
+             SetRandomVibe();
++            _initialWidth = this.Width;
++            _initialHeight = this.Height;
+ 
+             this.Loaded += (s, e) =>
+             {
++                SetupOverlayWindow();
+                 CheckRegistrationAndWhisper();
+ 
+                 var args = Environment.GetCommandLineArgs();
+@@ -287,8 +345,15 @@ namespace JonPlayer
+                 }
+             };
+ 
++
+             this.StateChanged += Window_StateChanged;
+             this.MouseMove += Window_MouseMove;
++            this.SourceInitialized += (s, e) => AttachMainWindowSyncHook();
++            this.LocationChanged += (s, e) => SyncOverlayWindowToMainWindow();
++            this.SizeChanged += (s, e) => SyncOverlayWindowToMainWindow();
++            
++            // Hook global thread messages to reliably capture shortcuts even if focus is lost or HwndHost steals it
++            System.Windows.Interop.ComponentDispatcher.ThreadPreprocessMessage += ComponentDispatcher_ThreadPreprocessMessage;
+ 
+             _fsMousePollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+             _fsMousePollTimer.Tick += FsMousePollTimer_Tick;
+@@ -369,16 +434,150 @@ namespace JonPlayer
+             };
+         }
+ 
++        private void ComponentDispatcher_ThreadPreprocessMessage(ref System.Windows.Interop.MSG msg, ref bool handled)
++        {
++            const int WM_KEYDOWN = 0x0100;
++            const int WM_SYSKEYDOWN = 0x0104;
++
++            if (!handled && (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN))
++            {
++                var key = System.Windows.Input.KeyInterop.KeyFromVirtualKey((int)msg.wParam);
++                // Do not intercept if user is typing in a TextBox
++                var focusedElement = System.Windows.Input.Keyboard.FocusedElement as System.Windows.DependencyObject;
++                if (focusedElement is System.Windows.Controls.TextBox || focusedElement is System.Windows.Controls.ComboBox)
++                    return;
++
++                var args = new System.Windows.Input.KeyEventArgs(
++                    System.Windows.Input.Keyboard.PrimaryDevice,
++                    System.Windows.PresentationSource.FromVisual(this) ?? new System.Windows.Interop.HwndSource(0, 0, 0, 0, 0, "", IntPtr.Zero),
++                    0, key)
++                {
++                    RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent
++                };
++                
++                Window_PreviewKeyDown(this, args);
++                
++                if (args.Handled)
++                {
++                    handled = true;
++                }
++            }
++        }
++
++        private void SetupOverlayWindow()
++        {
++            var mainGrid = (Grid)this.Content;
++            mainGrid.Background = null; // Let clicks pass through empty areas to MainWindow
++            this.Content = null;
++            
++            var videoContainer = new Grid { Background = WpfBrushes.Black };
++            _videoHwndHost = new VideoHwndHost();
++            _videoHwndHost.MouseLeftButtonDown += (s, e) =>
++            {
++                if (_isPipMode)
++                {
++                    BeginMainWindowDrag();
++                }
++            };
++            _videoHwndHost.MouseDoubleClick += (s, e) =>
++            {
++                if (_isPipMode) TogglePipMode();
++                else ToggleFullscreen();
++            };
++            videoContainer.Children.Add(_videoHwndHost);
++            this.Content = videoContainer;
++
++            _overlayWindow = new Window
++            {
++                WindowStyle = WindowStyle.None,
++                AllowsTransparency = true,
++                Background = WpfBrushes.Transparent,
++                ShowInTaskbar = false,
++                Owner = this,
++                Content = mainGrid,
++                Width = double.IsNaN(this.Width) ? 800 : this.Width,
++                Height = double.IsNaN(this.Height) ? 450 : this.Height,
++                MinWidth = this.MinWidth,
++                MinHeight = this.MinHeight,
++                Left = this.Left,
++                Top = this.Top,
++                WindowStartupLocation = this.WindowStartupLocation,
++                WindowState = this.WindowState,
++                Resources = this.Resources,
++                DataContext = this.DataContext,
++                Foreground = this.Foreground
++            };
++
++            AttachMainWindowSyncHook();
++            SyncOverlayWindowToMainWindow();
++
++            _overlayWindow.DragOver += Window_DragOver;
++            _overlayWindow.Drop += Window_Drop;
++
++            EventHandler activationHandler = (s, e) => {
++                if (_isFullscreen) this.Topmost = true;
++            };
++            EventHandler deactivationHandler = (s, e) => {
++                if (_isFullscreen) {
++                    if (!this.IsActive && !_overlayWindow.IsActive) {
++                        this.Topmost = false;
++                    }
++                }
++            };
++
++            this.Activated += activationHandler;
++            this.Deactivated += deactivationHandler;
++            _overlayWindow.Activated += activationHandler;
++            _overlayWindow.Deactivated += deactivationHandler;
++
++            System.Windows.Shell.WindowChrome.SetWindowChrome(_overlayWindow, new System.Windows.Shell.WindowChrome
++            {
++                CaptionHeight = 0,
++                ResizeBorderThickness = new Thickness(6),
++                GlassFrameThickness = new Thickness(0),
++                CornerRadius = new CornerRadius(0),
++                UseAeroCaptionButtons = false
++            });
++
++            TitleBar.MouseLeftButtonDown += (s, e) =>
++            {
++                if (e.ClickCount == 2)
++                {
++                    if (this.WindowState == WindowState.Maximized) this.WindowState = WindowState.Normal;
++                    else this.WindowState = WindowState.Maximized;
++                }
++                else if (e.LeftButton == MouseButtonState.Pressed)
++                {
++                    BeginMainWindowDrag();
++                }
++            };
++
++            _overlayWindow.PreviewKeyDown += Window_PreviewKeyDown;
++            _overlayWindow.Closing += (s, e) => 
++            {
++                if (!_isClosing) 
++                {
++                    this.Close();
++                }
++            };
++
++            _overlayWindow.StateChanged += (os, oe) => { if (!_isFullscreen) this.WindowState = _overlayWindow.WindowState; };
++
++            this.StateChanged += (os, oe) => { 
++                if (_isFullscreen) _overlayWindow.WindowState = WindowState.Normal;
++                else _overlayWindow.WindowState = this.WindowState; 
++            };
++
++            _overlayWindow.Show();
++
++
++        }
++
+         private void Decoder_FrameDecoded(IntPtr bgraData, int width, int height, int stride, bool isHardwareTexture)
+         {
+             Volatile.Write(ref _lastFrameTicks, DateTime.UtcNow.Ticks);
+-            _renderTimer.Restart();
+-            _renderer?.ResetSize(width, height);
+-            _renderer?.RenderFrame(bgraData, width, height, stride, isHardwareTexture);
+-            _renderTimer.Stop();
+-
+-            _totalRenderTimeMs += _renderTimer.Elapsed.TotalMilliseconds;
+-            _renderSamples++;
++            // Push frames logic was removed because Renderer now pulls from decoder.
++            // This event handler should be kept empty or removed.
+         }
+ 
+         private DateTime _lastSliderUpdate = DateTime.MinValue;
+@@ -507,7 +706,8 @@ namespace JonPlayer
+ 
+             if (_isPipMode && e.ButtonState == MouseButtonState.Pressed)
+             {
+-                try { this.DragMove(); } catch { }
++                BeginMainWindowDrag();
++                e.Handled = true;
+                 return;
+             }
+ 
+@@ -518,6 +718,16 @@ namespace JonPlayer
+             }
+         }
+ 
++        private void MainGrid_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
++        {
++            SetPipHoverOverlayVisible(true);
++        }
++
++        private void MainGrid_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
++        {
++            SetPipHoverOverlayVisible(false);
++        }
++
+         // 전체화면 마우스 위치 추적 및 팝업 표시
+         private void FsMousePollTimer_Tick(object? sender, EventArgs e)
+         {
+@@ -842,6 +1052,12 @@ namespace JonPlayer
+                 ListPlaylist.ScrollIntoView(_playlist[_playlistIndex]);
+         }
+ 
++        private static readonly HashSet<string> _allowedExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
++        {
++            ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
++            ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a"
++        };
++
+         private async void LoadPlaylist(string[] files)
+         {
+             if (_isClosing) return;
+@@ -849,12 +1065,6 @@ namespace JonPlayer
+             _playlist.Clear();
+             _playedIndices.Clear();
+             
+-            var allowedExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+-            {
+-                ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
+-                ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a"
+-            };
+-
+             var youtube = new YoutubeExplode.YoutubeClient();
+ 
+             foreach (var f in files) 
+@@ -901,7 +1111,7 @@ namespace JonPlayer
+                              path.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase);
+ 
+                 string ext = System.IO.Path.GetExtension(f);
+-                if (isUrl || allowedExts.Contains(ext))
++                if (isUrl || _allowedExts.Contains(ext))
+                 {
+                     _playlist.Add(new PlaylistItem { Name = isUrl && !isYoutube ? f : title, Path = path, AudioPath = audioPath, YoutubeUrl = youtubeUrl });
+                 }
+@@ -1408,32 +1618,38 @@ namespace JonPlayer
+                 _openCount++;
+ 
+                 TxtNowPlaying.Text = isUrl ? $"Loading... {displayName}" : "Loading...";
++                
++                if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
+                 if (isUrl) StartStreamingLoadingBlink();
++                else StopStreamingLoadingBlink();
++
++                // 이전 재생 즉시 정지 (오디오 + 자막 + AI 추출)
++                _waveOut?.Stop();
++                _subtitleManager.Clear();
++                _subtitlesEnabled = false;
++                Interlocked.Increment(ref _subtitleLoadGeneration);
++                if (TxtSubtitle != null) TxtSubtitle.Text = "";
++                if (SubtitleBorder != null) SubtitleBorder.Visibility = Visibility.Collapsed;
++                CancelWhisperExtraction();
+ 
+                 var oldDecoder = _decoder;
+                 _decoder = null;
+                 
+                 if (oldDecoder != null)
+                 {
++                    oldDecoder.Stop();
+                     DetachDecoderEvents(oldDecoder);
+                     DisposeDecoderInBackground(oldDecoder);
+                 }
+ 
+-                if (_renderer == null)
+-                {
+-                    _renderer = new D3D11VideoRenderer();
+-                    if (VideoElement != null) VideoElement.Source = _renderer.D3DImage;
+-                }
+-                if (_renderer != null)
+-                {
+-                    if (VideoElement != null && VideoElement.Source != _renderer.D3DImage)
+-                        VideoElement.Source = _renderer.D3DImage;
+-                }
+-
+                 newDecoder = new FFmpegMediaDecoder();
+                 newDecoder.SetSpeed(_currentSpeed);
+-                if (_renderer != null)
++
++                if (_renderer != null) { _renderer.Dispose(); _renderer = null; }
++                
++                if (_videoHwndHost != null)
+                 {
++                    _renderer = new D3D11VideoRenderer(_videoHwndHost.Handle, newDecoder);
+                     newDecoder.SetD3D11Device(_renderer.D3D11DevicePtr, _renderer.D3D11ContextPtr);
+                 }
+                 newDecoder.FrameDecoded += Decoder_FrameDecoded;
+@@ -1582,12 +1798,12 @@ namespace JonPlayer
+                     try
+                     {
+                         var tfile = TagLib.File.Create(path);
+-                        TxtAudioTitle.Text = string.IsNullOrWhiteSpace(tfile.Tag.Title) ? name : tfile.Tag.Title;
++                        TxtAudioTitle.Text = RepairLegacyKoreanTagText(tfile.Tag.Title, name);
+                         
+-                        string artist = string.Join(", ", tfile.Tag.Performers);
++                        string artist = string.Join(", ", tfile.Tag.Performers.Select(p => RepairLegacyKoreanTagText(p, string.Empty)).Where(p => !string.IsNullOrWhiteSpace(p)));
+                         TxtAudioArtist.Text = string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist;
+                         
+-                        TxtAudioAlbum.Text = string.IsNullOrWhiteSpace(tfile.Tag.Album) ? "Unknown Album" : tfile.Tag.Album;
++                        TxtAudioAlbum.Text = RepairLegacyKoreanTagText(tfile.Tag.Album, "Unknown Album");
+ 
+                         if (tfile.Tag.Pictures.Length > 0)
+                         {
+@@ -1658,6 +1874,35 @@ namespace JonPlayer
+             return string.IsNullOrWhiteSpace(fileName) ? path : fileName;
+         }
+ 
++        private static string RepairLegacyKoreanTagText(string? value, string fallback)
++        {
++            if (string.IsNullOrWhiteSpace(value)) return fallback;
++
++            string text = value.Trim();
++            if (ContainsHangul(text) || !LooksLikeSingleByteMojibake(text)) return text;
++
++            try
++            {
++                byte[] bytes = Encoding.Latin1.GetBytes(text);
++                string repaired = Encoding.GetEncoding(949).GetString(bytes).Trim();
++                return ContainsHangul(repaired) ? repaired : text;
++            }
++            catch
++            {
++                return text;
++            }
++        }
++
++        private static bool ContainsHangul(string text)
++        {
++            return text.Any(ch => ch >= '\uac00' && ch <= '\ud7a3');
++        }
++
++        private static bool LooksLikeSingleByteMojibake(string text)
++        {
++            return text.Any(ch => ch >= '\u00a0' && ch <= '\u00ff') || text.Contains('\ufffd');
++        }
++
+         private void StartStreamingLoadingBlink()
+         {
+             if (ImgSplash == null) return;
+@@ -1688,6 +1933,7 @@ namespace JonPlayer
+         {
+             Interlocked.Increment(ref _openGeneration);
+             Interlocked.Increment(ref _streamingSeekGeneration);
++            Interlocked.Increment(ref _subtitleLoadGeneration);
+             _isOpeningFile = false;
+             _isSeeking = false;
+             StopStreamingLoadingBlink();
+@@ -1849,9 +2095,15 @@ namespace JonPlayer
+                 PlayPauseIconPathFS.Data = geom;
+                 PlayPauseIconPathFS.Margin = isPlaying ? new Thickness(0) : new Thickness(2,0,0,0);
+             }
++            if (PlayPauseIconPathPip != null)
++            {
++                PlayPauseIconPathPip.Data = geom;
++                PlayPauseIconPathPip.Margin = isPlaying ? new Thickness(0) : new Thickness(2,0,0,0);
++            }
+ 
+             BtnPlayPause.ToolTip = isPlaying ? "Pause (Space)" : "Play (Space)";
+             if (BtnPlayPauseFS != null) BtnPlayPauseFS.ToolTip = isPlaying ? "Pause" : "Play";
++            if (BtnPlayPausePip != null) BtnPlayPausePip.ToolTip = isPlaying ? "Pause" : "Play";
+         }
+ 
+         private void NotesTimer_Tick(object? sender, EventArgs e)
+@@ -2353,8 +2605,12 @@ namespace JonPlayer
+             });
+ 
+             string tempWavPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "temp_audio.wav");
++            int activeOpenGen = Volatile.Read(ref _openGeneration);
++            string activeFilePath = _currentFilePath;
++            
+             await WhisperExtractor.ExtractSubtitlesAsync(_currentFilePath, tempWavPath, (status, progress) => {
+                 Dispatcher.InvokeAsync(() => {
++                    if (activeOpenGen != Volatile.Read(ref _openGeneration) || activeFilePath != _currentFilePath) return;
+                     int percentage = (int)progress; // 10% ~ 100%
+                     
+                     // 중앙 알림창 텍스트 통일 (아이콘 제외)
+@@ -2384,10 +2640,12 @@ namespace JonPlayer
+                 });
+             }, (start, end, text) => {
+                 Dispatcher.InvokeAsync(() => {
++                    if (activeOpenGen != Volatile.Read(ref _openGeneration) || activeFilePath != _currentFilePath) return;
+                     _subtitleManager.AddSubtitle(start, end, text);
+                 });
+             }, (srtPathResult, errorMsg) => {
+                 Dispatcher.InvokeAsync(async () => {
++                    if (activeOpenGen != Volatile.Read(ref _openGeneration) || activeFilePath != _currentFilePath) return;
+                     WhisperLoadingOverlay.Visibility = Visibility.Collapsed;
+                     _isWhisperAnimatingToCC = false;
+                     WhisperLoadingScale.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleXProperty, null);
+@@ -2470,6 +2728,7 @@ namespace JonPlayer
+ 
+         private void SliderTimeline_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+         {
++            _suppressTimelineSeek = true;
+             _isUserDraggingSlider = false;
+             
+             Slider? targetSlider = sender as Slider;
+@@ -2487,6 +2746,8 @@ namespace JonPlayer
+                 _waveOut?.Play();
+                 UpdatePlayPauseUI(true);
+             }
++
++            Dispatcher.BeginInvoke(new Action(() => _suppressTimelineSeek = false), DispatcherPriority.Background);
+         }
+ 
+         private void Decoder_RotationDetected(double rotation)
+@@ -2518,7 +2779,7 @@ namespace JonPlayer
+ 
+             // Only seek on direct click (not during drag — DragCompleted handles that,
+             // and not when the player is updating the slider position).
+-            if (!_isUserDraggingSlider)
++            if (!_isUserDraggingSlider && !_suppressTimelineSeek)
+             {
+                 DoSeek(e.NewValue);
+             }
+@@ -2753,10 +3014,17 @@ namespace JonPlayer
+         private void BtnFsCloseVideo_Click(object sender, RoutedEventArgs e)
+         {
+             if (_isFullscreen) this.Close();
+-        }
++        } 
+ 
+         private void ToggleFullscreen()
+         {
++            if (_isPipMode)
++            {
++                ExitPipMode();
++                EnterFullscreen();
++                return;
++            }
++
+             if (_isFullscreen) ExitFullscreen();
+             else EnterFullscreen();
+         }
+@@ -2767,6 +3035,13 @@ namespace JonPlayer
+         private Rect _backupBounds;
+         private double _backupMinWidth;
+         private double _backupMinHeight;
++        private double _subtitleNormalFontSize = 26;
++        private Thickness _subtitleNormalMargin = new Thickness(20, 0, 20, 20);
++        private double _subtitleNormalMaxWidth = 1000;
++        private Thickness _statsNormalMargin = new Thickness(10);
++        private Thickness _statsNormalPadding = new Thickness(10);
++        private double _statsNormalFontSize = 12;
++        private double _statsNormalLineHeight = 18;
+ 
+         private void BtnPip_Click(object sender, RoutedEventArgs e) => TogglePipMode();
+ 
+@@ -2797,24 +3072,37 @@ namespace JonPlayer
+             _backupBounds = new Rect(this.Left, this.Top, this.Width, this.Height);
+             _backupMinWidth = this.MinWidth;
+             _backupMinHeight = this.MinHeight;
++            CaptureOverlayDefaults();
++
++            if (_isDraggingSubtitle)
++            {
++                _isDraggingSubtitle = false;
++                SubtitleBorder.ReleaseMouseCapture();
++            }
+ 
+             this.MinWidth = 0;
+             this.MinHeight = 0;
++            if (_overlayWindow != null)
++            {
++                _overlayWindow.MinWidth = 0;
++                _overlayWindow.MinHeight = 0;
++            }
+ 
+-            RowTitleBar.Height = new GridLength(0);
+-            RowTimeline.Height = new GridLength(0);
+-            RowControls.Height = new GridLength(0);
++            ApplyPipOverlayLayout(false);
+ 
+             this.WindowStyle = WindowStyle.None;
+             this.Topmost = true;
+             this.Width = 400;
+             this.Height = 225;
+             
++            if (_overlayWindow != null) _overlayWindow.IsHitTestVisible = true;
++
+             var screen = System.Windows.Forms.Screen.FromHandle(new System.Windows.Interop.WindowInteropHelper(this).Handle);
+             this.Left = screen.WorkingArea.Right - this.Width - 20;
+             this.Top = screen.WorkingArea.Bottom - this.Height - 20;
+ 
+             if (BtnPip != null) BtnPip.ToolTip = "Exit PIP Mode (P)";
++            SetPipHoverOverlayVisible(MainGrid.IsMouseOver);
+         }
+ 
+         private void ExitPipMode()
+@@ -2826,6 +3114,11 @@ namespace JonPlayer
+             this.Topmost = _backupTopmost;
+             this.MinWidth = _backupMinWidth;
+             this.MinHeight = _backupMinHeight;
++            if (_overlayWindow != null)
++            {
++                _overlayWindow.MinWidth = _backupMinWidth;
++                _overlayWindow.MinHeight = _backupMinHeight;
++            }
+             this.Left = _backupBounds.Left;
+             this.Top = _backupBounds.Top;
+             this.Width = _backupBounds.Width;
+@@ -2834,10 +3127,124 @@ namespace JonPlayer
+             RowTitleBar.Height = new GridLength(40);
+             RowTimeline.Height = GridLength.Auto;
+             RowControls.Height = GridLength.Auto;
++            if (BtnPlayPausePip != null) BtnPlayPausePip.Visibility = Visibility.Collapsed;
++            RestoreNormalPlayerLayout();
++
++            if (_overlayWindow != null) _overlayWindow.IsHitTestVisible = true;
+ 
+             if (BtnPip != null) BtnPip.ToolTip = "PIP Mode (P)";
+         }
+ 
++        private void SetPipHoverOverlayVisible(bool visible)
++        {
++            if (!_isPipMode) return;
++
++            RowTitleBar.Height = new GridLength(0);
++            RowTimeline.Height = new GridLength(0);
++            RowControls.Height = new GridLength(0);
++            if (BtnPlayPausePip != null) BtnPlayPausePip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
++            ApplyPipOverlayLayout(visible);
++            MainGrid.UpdateLayout();
++            SyncOverlayWindowToMainWindow();
++        }
++
++        private void CaptureOverlayDefaults()
++        {
++            if (TxtSubtitle != null)
++            {
++                _subtitleNormalFontSize = TxtSubtitle.FontSize;
++                _subtitleNormalMaxWidth = TxtSubtitle.MaxWidth;
++            }
++            if (SubtitleBorder != null) _subtitleNormalMargin = SubtitleBorder.Margin;
++            if (OverlayStats != null)
++            {
++                _statsNormalMargin = OverlayStats.Margin;
++                _statsNormalPadding = OverlayStats.Padding;
++            }
++            if (TxtOverlayStats != null)
++            {
++                _statsNormalFontSize = TxtOverlayStats.FontSize;
++                _statsNormalLineHeight = TxtOverlayStats.LineHeight;
++            }
++        }
++
++        private void ApplyPipControlBarLayout(bool controlsVisible)
++        {
++            double pipWidth = Math.Max(0, this.ActualWidth > 0 ? this.ActualWidth : this.Width);
++            if (ControlBarGrid != null) ControlBarGrid.MinWidth = controlsVisible ? Math.Min(260, pipWidth) : 0;
++            if (ControlBarLeftPanel != null) ControlBarLeftPanel.Visibility = controlsVisible ? Visibility.Collapsed : Visibility.Visible;
++            if (ControlBarRightPanel != null) ControlBarRightPanel.Visibility = controlsVisible ? Visibility.Collapsed : Visibility.Visible;
++            if (ControlBarCenterPanel != null) ControlBarCenterPanel.Margin = controlsVisible ? new Thickness(0, 4, 0, 4) : new Thickness(0, 8, 0, 8);
++        }
++
++        private void ApplyPipOverlayLayout(bool controlsVisible)
++        {
++            double pipWidth = Math.Max(240, this.ActualWidth > 0 ? this.ActualWidth : this.Width);
++
++            ApplyPipControlBarLayout(controlsVisible);
++
++            if (SubtitleBorder != null)
++            {
++                SubtitleBorder.Margin = new Thickness(8, 0, 8, controlsVisible ? 8 : 6);
++                SubtitleBorder.Padding = new Thickness(8, 4, 8, 4);
++                SubtitleTransform.X = 0;
++                SubtitleTransform.Y = 0;
++                FsSubtitleShift.BeginAnimation(System.Windows.Media.TranslateTransform.XProperty, null);
++                FsSubtitleShift.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, null);
++                FsSubtitleShift.X = 0;
++                FsSubtitleShift.Y = 0;
++            }
++            if (TxtSubtitle != null)
++            {
++                TxtSubtitle.FontSize = 12;
++                TxtSubtitle.MaxWidth = Math.Max(180, pipWidth - 24);
++            }
++
++            if (OverlayStats != null)
++            {
++                OverlayStats.Margin = new Thickness(4);
++                OverlayStats.Padding = new Thickness(5);
++                OverlayStats.MaxWidth = Math.Max(180, pipWidth - 12);
++                OverlayStats.MaxHeight = Math.Max(80, (this.ActualHeight > 0 ? this.ActualHeight : this.Height) - 8);
++            }
++            if (TxtOverlayStats != null)
++            {
++                TxtOverlayStats.FontSize = 8;
++                TxtOverlayStats.LineHeight = 10;
++            }
++        }
++
++        private void RestoreNormalPlayerLayout()
++        {
++            if (ControlBarGrid != null) ControlBarGrid.MinWidth = 800;
++            if (ControlBarLeftPanel != null) ControlBarLeftPanel.Visibility = Visibility.Visible;
++            if (ControlBarRightPanel != null) ControlBarRightPanel.Visibility = Visibility.Visible;
++            if (ControlBarCenterPanel != null) ControlBarCenterPanel.Margin = new Thickness(0, 8, 0, 8);
++
++            if (SubtitleBorder != null)
++            {
++                SubtitleBorder.Margin = _subtitleNormalMargin;
++                SubtitleBorder.Padding = new Thickness(16, 8, 16, 8);
++            }
++            if (TxtSubtitle != null)
++            {
++                TxtSubtitle.FontSize = _subtitleNormalFontSize;
++                TxtSubtitle.MaxWidth = _subtitleNormalMaxWidth;
++            }
++            if (OverlayStats != null)
++            {
++                OverlayStats.Margin = _statsNormalMargin;
++                OverlayStats.Padding = _statsNormalPadding;
++                OverlayStats.MaxWidth = double.PositiveInfinity;
++                OverlayStats.MaxHeight = double.PositiveInfinity;
++            }
++            if (TxtOverlayStats != null)
++            {
++                TxtOverlayStats.FontSize = _statsNormalFontSize;
++                TxtOverlayStats.LineHeight = _statsNormalLineHeight;
++            }
++        }
++
+         private void FitScreen()
+         {
+             if (_isFullscreen) ExitFullscreen();
+@@ -2872,36 +3279,65 @@ namespace JonPlayer
+ 
+         private void CaptureFrame()
+         {
+-            if (VideoElement.Source == null) 
+-            { 
+-                ShowToast("캡처할 화면이 없습니다."); 
+-                return; 
++            if (_decoder == null || !_decoder.IsPlaying && !_decoder.IsRunning) 
++            {
++                ShowToast("캡처할 영상이 없습니다.");
++                return;
+             }
++
+             try
+             {
+-                var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(
+-                    (int)VideoElement.ActualWidth, (int)VideoElement.ActualHeight,
+-                    96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+-                var drawingVisual = new System.Windows.Media.DrawingVisual();
+-                using (var context = drawingVisual.RenderOpen())
++                var source = PresentationSource.FromVisual(this);
++                if (source == null) { ShowToast("캡처할 수 없는 상태입니다."); return; }
++
++                double windowWidth = VideoGrid.ActualWidth;
++                double windowHeight = VideoGrid.ActualHeight;
++                double videoWidth = _decoder.Width;
++                double videoHeight = _decoder.Height;
++
++                double viewX = 0, viewY = 0, viewW = windowWidth, viewH = windowHeight;
++
++                if (videoWidth > 0 && videoHeight > 0)
+                 {
+-                    var rect = new Rect(0, 0, VideoElement.ActualWidth, VideoElement.ActualHeight);
+-                    context.DrawImage(VideoElement.Source, rect);
++                    double windowAspect = windowWidth / windowHeight;
++                    double videoAspect = videoWidth / videoHeight;
++
++                    if (windowAspect > videoAspect)
++                    {
++                        viewW = windowHeight * videoAspect;
++                        viewX = (windowWidth - viewW) / 2.0;
++                    }
++                    else
++                    {
++                        viewH = windowWidth / videoAspect;
++                        viewY = (windowHeight - viewH) / 2.0;
++                    }
+                 }
+-                rtb.Render(drawingVisual);
+-                
+-                var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+-                encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
+-                
+-                string downloadsPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+-                string filename = $"JonPlayer_Snapshot_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+-                string fullPath = System.IO.Path.Combine(downloadsPath, filename);
+-                
+-                using (var fs = new System.IO.FileStream(fullPath, System.IO.FileMode.Create))
++
++                Point physicalTopLeft = VideoGrid.PointToScreen(new Point(viewX, viewY));
++                Point physicalBottomRight = VideoGrid.PointToScreen(new Point(viewX + viewW, viewY + viewH));
++
++                int x = (int)physicalTopLeft.X;
++                int y = (int)physicalTopLeft.Y;
++                int width = (int)(physicalBottomRight.X - physicalTopLeft.X);
++                int height = (int)(physicalBottomRight.Y - physicalTopLeft.Y);
++
++                if (width <= 0 || height <= 0) return;
++
++                using (var bmp = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                 {
+-                    encoder.Save(fs);
++                    using (var g = System.Drawing.Graphics.FromImage(bmp))
++                    {
++                        g.CopyFromScreen(x, y, 0, 0, bmp.Size, System.Drawing.CopyPixelOperation.SourceCopy);
++                    }
++
++                    string downloadsPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
++                    string filename = $"JonPlayer_Snapshot_{DateTime.Now:yyyyMMdd_HHmmss}.png";
++                    string fullPath = System.IO.Path.Combine(downloadsPath, filename);
++
++                    bmp.Save(fullPath, System.Drawing.Imaging.ImageFormat.Png);
++                    ShowToast($"캡처 완료: {filename}");
+                 }
+-                ShowToast($"캡처 완료: {filename}");
+             }
+             catch (Exception ex)
+             {
+@@ -2962,12 +3398,7 @@ namespace JonPlayer
+             _prevResizeMode  = ResizeMode;
+             _prevTopmost     = Topmost;
+ 
+-            var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
+-            if (chrome != null)
+-            {
+-                chrome.CaptionHeight = 0;
+-                chrome.ResizeBorderThickness = new Thickness(0);
+-            }
++            System.Windows.Shell.WindowChrome.SetWindowChrome(this, null);
+ 
+             WindowStyle  = WindowStyle.None;
+             ResizeMode   = ResizeMode.NoResize;
+@@ -2988,6 +3419,22 @@ namespace JonPlayer
+ 
+             Dispatcher.BeginInvoke(new Action(() =>
+             {
++                if (_overlayWindow != null)
++                {
++                    var source = PresentationSource.FromVisual(this);
++                    if (source != null)
++                    {
++                        var transform = source.CompositionTarget.TransformFromDevice;
++                        Point physicalTopLeft = this.PointToScreen(new Point(0, 0));
++                        Point logicalTopLeft = transform.Transform(physicalTopLeft);
++                        
++                        _overlayWindow.Left = logicalTopLeft.X;
++                        _overlayWindow.Top = logicalTopLeft.Y;
++                        _overlayWindow.Width = this.ActualWidth;
++                        _overlayWindow.Height = this.ActualHeight;
++                    }
++                }
++
+                 VideoGrid.UpdateLayout();
+                 PopupFsExit.IsOpen = false;
+                 FsBottomStrip.Visibility = Visibility.Collapsed;
+@@ -3023,12 +3470,17 @@ namespace JonPlayer
+                 BtnMaximize.ToolTip = "Maximize";
+             }
+ 
+-            var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
+-            if (chrome != null)
++            System.Windows.Shell.WindowChrome.SetWindowChrome(this, new System.Windows.Shell.WindowChrome
+             {
+-                chrome.CaptionHeight = 40;
+-                chrome.ResizeBorderThickness = new Thickness(6);
+-            }
++                CaptionHeight = 40,
++                ResizeBorderThickness = new Thickness(6),
++                GlassFrameThickness = new Thickness(0, 0, 0, 1),
++                UseAeroCaptionButtons = false,
++                CornerRadius = new CornerRadius(0),
++                NonClientFrameEdges = System.Windows.Shell.NonClientFrameEdges.None
++            });
++
++
+ 
+             Dispatcher.BeginInvoke(new Action(() =>
+             {
+@@ -3123,19 +3575,26 @@ namespace JonPlayer
+ 
+                 case Key.F11: ToggleFullscreen(); e.Handled = true; break;
+ 
++                case Key.MediaPlayPause: TogglePlayPause(); e.Handled = true; break;
++                case Key.MediaNextTrack: PlayNext(); e.Handled = true; break;
++                case Key.MediaPreviousTrack: PlayPrev(); e.Handled = true; break;
++                case Key.VolumeMute: ToggleMute(); e.Handled = true; break;
++                case Key.VolumeUp: AdjustVolume(5); e.Handled = true; break;
++                case Key.VolumeDown: AdjustVolume(-5); e.Handled = true; break;
++
+                 // --- Video & Audio Filter Shortcuts ---
+                 case Key.W: 
+                     if (isCtrl) { CloseFile(); }
+-                    else if (isShift) { SubtitleTransform.Y -= 10; }
++                    else if (isShift && !_isPipMode) { SubtitleTransform.Y -= 10; }
+                     e.Handled = true; break;
+                 case Key.S: 
+-                    if (isShift) { SubtitleTransform.Y += 10; }
++                    if (isShift && !_isPipMode) { SubtitleTransform.Y += 10; }
+                     e.Handled = true; break;
+                 case Key.D:
+-                    if (isShift) { SubtitleTransform.X += 10; e.Handled = true; }
++                    if (isShift && !_isPipMode) { SubtitleTransform.X += 10; e.Handled = true; }
+                     break;
+                 case Key.A:
+-                    if (isShift) { SubtitleTransform.X -= 10; e.Handled = true; }
++                    if (isShift && !_isPipMode) { SubtitleTransform.X -= 10; e.Handled = true; }
+                     break;
+                 case Key.R:
+                     if (isShift && _decoder != null) { _decoder.SetAudioFilters(1.0, 0.0); if (_audioEnhancer != null) _audioEnhancer.IsEnhancerEnabled = false; ShowToast("Audio Filters Reset"); e.Handled = true; }
+@@ -3203,6 +3662,22 @@ namespace JonPlayer
+                 case Key.Escape:
+                     if (_isPipMode) { ExitPipMode(); e.Handled = true; break; }
+                     if (_isFullscreen) { ExitFullscreen(); e.Handled = true; break; }
++                    if (this.WindowState == WindowState.Maximized)
++                    {
++                        this.WindowState = WindowState.Normal;
++                        ShowToast("창 복원");
++                    }
++                    else
++                    {
++                        this.Width = _initialWidth;
++                        this.Height = _initialHeight;
++                        // Center on current screen
++                        var screen = System.Windows.Forms.Screen.FromHandle(new System.Windows.Interop.WindowInteropHelper(this).Handle);
++                        this.Left = screen.WorkingArea.Left + (screen.WorkingArea.Width - _initialWidth) / 2;
++                        this.Top = screen.WorkingArea.Top + (screen.WorkingArea.Height - _initialHeight) / 2;
++                        ShowToast("초기 크기로 복원");
++                    }
++                    e.Handled = true;
+                     break;
+                     
+                     // Key.F merged above
+@@ -3307,21 +3782,59 @@ namespace JonPlayer
+ 
+             var sb = new StringBuilder();
+             
+-            sb.AppendLine("Video");
++            bool hasVideo = _decoder.HasVideo && !string.Equals(stats.VideoInfo, "No Video", StringComparison.OrdinalIgnoreCase);
++            var infoParts = stats.VideoInfo?.Split(' ', StringSplitOptions.RemoveEmptyEntries);
++            string res = hasVideo && infoParts?.Length > 0 ? infoParts[0] : "No Video";
++            string codec = hasVideo && infoParts?.Length > 1 ? infoParts[1] : "";
++            if (!hasVideo)
++            {
++                var audioParts = stats.AudioInfo?.Split(' ', StringSplitOptions.RemoveEmptyEntries);
++                codec = audioParts?.Length > 0 ? audioParts[^1] : "";
++            }
++
++            if (_isPipMode)
++            {
++                sb.AppendLine(hasVideo ? "Video" : "Audio");
++                sb.AppendLine($"Codec  {codec}");
++                if (hasVideo)
++                {
++                    sb.AppendLine($"Size   {res}");
++                    sb.AppendLine($"FPS    {stats.ActualFps:F1}/{stats.TargetFps:F1}");
++                    sb.AppendLine($"Drop   {stats.DroppedFrames}");
++                    sb.AppendLine($"HW     {(stats.IsHwAccel ? "D3D11" : "CPU")}");
++                }
++                else
++                {
++                    sb.AppendLine($"Audio  {stats.AudioInfo}");
++                }
++                sb.AppendLine($"Queue  V{stats.PacketQueueSize} A{stats.AudioQueueSize}");
++                sb.AppendLine($"Drift  {stats.SyncDelayMs:F0} ms");
++                sb.AppendLine($"CPU    {cpuUsage:F1}%");
++                sb.Append($"State  {state}");
++                TxtOverlayStats.Text = sb.ToString();
++                return;
++            }
++
++            sb.AppendLine(hasVideo ? "Video" : "Audio");
+             sb.AppendLine("────────────────────");
+-            var infoParts = stats.VideoInfo?.Split(' ');
+-            string res = infoParts?.Length > 0 ? infoParts[0] : "";
+-            string codec = infoParts?.Length > 1 ? infoParts[1] : "";
+             
+             sb.AppendLine($"{"Codec".PadRight(12)}{codec}");
+-            sb.AppendLine($"{"Resolution".PadRight(12)}{res}");
+-            sb.AppendLine($"{"DecodeFPS".PadRight(12)}{stats.ActualFps:F1} / {stats.TargetFps:F1}");
+-            sb.AppendLine($"{"DisplayFPS".PadRight(12)}{_renderer?.PresentedFps ?? 0:F1}");
+-            sb.AppendLine($"{"Render Events".PadRight(14)}{_renderer?.RenderEventsPerSecond ?? 0}");
+-            sb.AppendLine($"{"Dropped".PadRight(12)}{stats.DroppedFrames}");
+-            sb.AppendLine($"{"RenderSkip".PadRight(12)}{_renderer?.SkippedFramesPerSecond ?? 0}");
++            if (hasVideo)
++            {
++                sb.AppendLine($"{"Resolution".PadRight(12)}{res}");
++                sb.AppendLine($"{"DecodeFPS".PadRight(12)}{stats.ActualFps:F1} / {stats.TargetFps:F1}");
++                sb.AppendLine($"{"DisplayFPS".PadRight(12)}{_renderer?.PresentedFps ?? 0:F1}");
++                sb.AppendLine($"{"Render Events".PadRight(14)}{_renderer?.PresentedFps ?? 0}");
++                sb.AppendLine($"{"Dropped".PadRight(12)}{stats.DroppedFrames}");
++                sb.AppendLine($"{"RenderSkip".PadRight(12)}{_renderer?.SkippedFramesPerSecond ?? 0}");
++            }
++            else
++            {
++                sb.AppendLine($"{"Format".PadRight(12)}{stats.AudioInfo}");
++            }
+             sb.AppendLine($"{"Bitrate".PadRight(12)}{stats.Bitrate / 1000} kbps");
+-            sb.AppendLine($"{"HW Accel".PadRight(12)}{(stats.IsHwAccel ? "Active (D3D11)" : "Inactive (CPU)")}");
++            if (hasVideo)
++                sb.AppendLine($"{"HW Accel".PadRight(12)}{(stats.IsHwAccel ? "Active (D3D11)" : "Inactive (CPU)")}");
+             sb.AppendLine();
+             
+             sb.AppendLine("Performance");
+@@ -3365,6 +3878,8 @@ namespace JonPlayer
+ 
+         private void SubtitleBorder_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+         {
++            if (_isPipMode) return;
++
+             _isDraggingSubtitle = true;
+             _subtitleLastMousePos = e.GetPosition(this);
+             SubtitleBorder.CaptureMouse();
+@@ -3381,6 +3896,8 @@ namespace JonPlayer
+ 
+         private void SubtitleBorder_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+         {
++            if (_isPipMode) return;
++
+             if (_isDraggingSubtitle)
+             {
+                 var currentPos = e.GetPosition(this);
+@@ -3400,4 +3917,5 @@ namespace JonPlayer
+             // All cleanup is handled in the Closed event handler (constructor)
+         }
+     }
+-}
+\ No newline at end of file
++}
++

@@ -92,6 +92,15 @@ public class VideoHwndHost : HwndHost
 	[DllImport("user32.dll")]
 	private static extern int GetDoubleClickTime();
 
+	[DllImport("user32.dll")]
+	private static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
+
+	public struct POINT
+	{
+		public int X;
+		public int Y;
+	}
+
 	protected override IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
 	{
 		switch (msg)

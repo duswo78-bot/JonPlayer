@@ -90,7 +90,44 @@ namespace JonPlayer
         private static extern bool ReleaseCapture();
 
 
-        private bool _mainWindowSyncHookAttached;
+
+        private void SyncMainWindowToOverlay()
+        {
+            if (_overlayWindow == null || this.WindowState == WindowState.Minimized) return;
+
+            double targetLeft = _overlayWindow.Left + 1;
+            double targetTop = _overlayWindow.Top + 1;
+            double targetWidth = Math.Max(this.MinWidth, _overlayWindow.Width - 2);
+            double targetHeight = Math.Max(this.MinHeight, _overlayWindow.Height - 2);
+
+            if (Math.Abs(this.Left - targetLeft) > 1.0) this.Left = targetLeft;
+            if (Math.Abs(this.Top - targetTop) > 1.0) this.Top = targetTop;
+            if (Math.Abs(this.Width - targetWidth) > 1.0) this.Width = targetWidth;
+            if (Math.Abs(this.Height - targetHeight) > 1.0) this.Height = targetHeight;
+        }
+
+        private void SyncOverlayWindowToMainWindow()
+        {
+            if (_overlayWindow == null || this.WindowState == WindowState.Minimized) return;
+
+            double targetLeft = this.Left - 1;
+            double targetTop = this.Top - 1;
+            double targetWidth = (this.ActualWidth > 0 ? this.ActualWidth : this.Width) + 2;
+            double targetHeight = (this.ActualHeight > 0 ? this.ActualHeight : this.Height) + 2;
+
+            if (this.WindowState == WindowState.Maximized)
+            {
+                targetLeft = this.Left;
+                targetTop = this.Top;
+                targetWidth = this.ActualWidth > 0 ? this.ActualWidth : this.Width;
+                targetHeight = this.ActualHeight > 0 ? this.ActualHeight : this.Height;
+            }
+
+            if (Math.Abs(_overlayWindow.Left - targetLeft) > 1.0) _overlayWindow.Left = targetLeft;
+            if (Math.Abs(_overlayWindow.Top - targetTop) > 1.0) _overlayWindow.Top = targetTop;
+            if (Math.Abs(_overlayWindow.Width - targetWidth) > 1.0) _overlayWindow.Width = targetWidth;
+            if (Math.Abs(_overlayWindow.Height - targetHeight) > 1.0) _overlayWindow.Height = targetHeight;
+        }
 
         private void BeginMainWindowDrag()
         {
@@ -101,52 +138,7 @@ namespace JonPlayer
             _ = SendMessage(handle, 0xA1, 2, 0); // WM_NCLBUTTONDOWN, HTCAPTION
         }
 
-        private void AttachMainWindowSyncHook()
-        {
-            if (_mainWindowSyncHookAttached) return;
 
-            var handle = new WindowInteropHelper(this).Handle;
-            if (handle == IntPtr.Zero) return;
-
-            HwndSource.FromHwnd(handle)?.AddHook(MainWindowSyncHook);
-            _mainWindowSyncHookAttached = true;
-        }
-
-        private void SyncOverlayWindowToMainWindow()
-        {
-            if (_overlayWindow == null || _isFullscreen || this.WindowState == WindowState.Minimized) return;
-
-            try
-            {
-                var source = PresentationSource.FromVisual(this);
-                if (source != null && source.CompositionTarget != null)
-                {
-                    Point screenTopLeft = this.PointToScreen(new Point(0, 0));
-                    Point logicalTopLeft = source.CompositionTarget.TransformFromDevice.Transform(screenTopLeft);
-
-                    _overlayWindow.Left = logicalTopLeft.X;
-                    _overlayWindow.Top = logicalTopLeft.Y;
-                    _overlayWindow.Width = this.ActualWidth > 0 ? this.ActualWidth : this.Width;
-                    _overlayWindow.Height = this.ActualHeight > 0 ? this.ActualHeight : this.Height;
-                    return;
-                }
-            }
-            catch (InvalidOperationException) { }
-
-            _overlayWindow.Left = this.Left;
-            _overlayWindow.Top = this.Top;
-            _overlayWindow.Width = this.ActualWidth > 0 ? this.ActualWidth : this.Width;
-            _overlayWindow.Height = this.ActualHeight > 0 ? this.ActualHeight : this.Height;
-        }
-
-        private IntPtr MainWindowSyncHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
-        {
-            if (msg == 0x0047 && _overlayWindow != null) // WM_WINDOWPOSCHANGED only
-            {
-                Dispatcher.BeginInvoke(SyncOverlayWindowToMainWindow, System.Windows.Threading.DispatcherPriority.Send);
-            }
-            return IntPtr.Zero;
-        }
         private D3D11VideoRenderer? _renderer;
         private FFmpegMediaDecoder? _decoder;
         
@@ -365,8 +357,7 @@ namespace JonPlayer
 
             this.StateChanged += Window_StateChanged;
             this.MouseMove += Window_MouseMove;
-            this.SourceInitialized += (s, e) => AttachMainWindowSyncHook();
-            this.LocationChanged += (s, e) => SyncOverlayWindowToMainWindow();
+                        this.LocationChanged += (s, e) => SyncOverlayWindowToMainWindow();
             this.SizeChanged += (s, e) => SyncOverlayWindowToMainWindow();
             
             // Hook global thread messages to reliably capture shortcuts even if focus is lost or HwndHost steals it
@@ -384,7 +375,11 @@ namespace JonPlayer
             _cursorHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _cursorHideTimer.Tick += (s, e) =>
             {
-                if (_isFullscreen) this.Cursor = System.Windows.Input.Cursors.None;
+                if (_isFullscreen || this.WindowState == WindowState.Maximized)
+                {
+                    this.Cursor = System.Windows.Input.Cursors.None;
+                    if (_overlayWindow != null) _overlayWindow.Cursor = System.Windows.Input.Cursors.None;
+                }
                 _cursorHideTimer.Stop();
             };
 
@@ -512,10 +507,10 @@ namespace JonPlayer
                 ShowInTaskbar = false,
                 Owner = this,
                 Content = mainGrid,
-                Width = double.IsNaN(this.Width) ? 800 : this.Width,
-                Height = double.IsNaN(this.Height) ? 450 : this.Height,
-                MinWidth = this.MinWidth,
-                MinHeight = this.MinHeight,
+                Width = double.IsNaN(this.Width) ? 800 : this.Width + 2,
+                Height = double.IsNaN(this.Height) ? 450 : this.Height + 2,
+                MinWidth = this.MinWidth + 2,
+                MinHeight = this.MinHeight + 2,
                 Left = this.Left,
                 Top = this.Top,
                 WindowStartupLocation = this.WindowStartupLocation,
@@ -525,8 +520,10 @@ namespace JonPlayer
                 Foreground = this.Foreground
             };
 
-            AttachMainWindowSyncHook();
             SyncOverlayWindowToMainWindow();
+
+            _overlayWindow.LocationChanged += (s, e) => SyncMainWindowToOverlay();
+            _overlayWindow.SizeChanged += (s, e) => SyncMainWindowToOverlay();
 
             _overlayWindow.DragOver += Window_DragOver;
             _overlayWindow.Drop += Window_Drop;
@@ -1436,6 +1433,7 @@ namespace JonPlayer
         private void Window_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
         {
             if (this.Cursor != System.Windows.Input.Cursors.Arrow) this.Cursor = System.Windows.Input.Cursors.Arrow;
+            if (_overlayWindow != null && _overlayWindow.Cursor != System.Windows.Input.Cursors.Arrow) _overlayWindow.Cursor = System.Windows.Input.Cursors.Arrow;
             _cursorHideTimer.Stop();
             _cursorHideTimer.Start();
         }
@@ -3350,10 +3348,48 @@ namespace JonPlayer
             }
         }
 
+        private bool _isFitScreen = false;
+        private Rect _backupNormalBounds;
+
         private void FitScreen()
         {
             if (_isFullscreen) ExitFullscreen();
-            this.WindowState = this.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+            
+            if (_isFitScreen)
+            {
+                _isFitScreen = false;
+                this.Left = _backupNormalBounds.Left;
+                this.Top = _backupNormalBounds.Top;
+                this.Width = _backupNormalBounds.Width;
+                this.Height = _backupNormalBounds.Height;
+            }
+            else
+            {
+                _backupNormalBounds = new Rect(this.Left, this.Top, this.Width, this.Height);
+                var screen = System.Windows.Forms.Screen.FromHandle(new System.Windows.Interop.WindowInteropHelper(this).Handle);
+                
+                var source = PresentationSource.FromVisual(this);
+                if (source != null && source.CompositionTarget != null)
+                {
+                    var transform = source.CompositionTarget.TransformFromDevice;
+                    var tl = transform.Transform(new Point(screen.WorkingArea.Left, screen.WorkingArea.Top));
+                    var br = transform.Transform(new Point(screen.WorkingArea.Right, screen.WorkingArea.Bottom));
+                    var logicalWorkingArea = new Rect(tl, br);
+                    
+                    this.Left = logicalWorkingArea.Left;
+                    this.Top = logicalWorkingArea.Top;
+                    this.Width = logicalWorkingArea.Width;
+                    this.Height = logicalWorkingArea.Height;
+                }
+                else
+                {
+                    this.Left = screen.WorkingArea.Left;
+                    this.Top = screen.WorkingArea.Top;
+                    this.Width = screen.WorkingArea.Width;
+                    this.Height = screen.WorkingArea.Height;
+                }
+                _isFitScreen = true;
+            }
         }
 
         private void ResizeScreen(double scale)
@@ -3968,6 +4004,11 @@ namespace JonPlayer
             sb.AppendLine($"{"CPU".PadRight(12)}{cpuUsage:F1}%");
             sb.AppendLine($"{"Memory".PadRight(12)}{memoryMb:F0} MB");
             sb.AppendLine($"{"Threads".PadRight(12)}{totalThreads}");
+            if (_audioEnhancer != null && _audioEnhancer.BaselineVolumeMultiplier != 1.0f)
+            {
+                double gainDb = 20 * Math.Log10(_audioEnhancer.BaselineVolumeMultiplier);
+                sb.AppendLine($"{"Audio Gain".PadRight(12)}{gainDb:+0.0;-0.0;0.0} dB");
+            }
             sb.AppendLine();
             
             sb.AppendLine("Session");
