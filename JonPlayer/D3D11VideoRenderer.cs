@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -25,6 +26,8 @@ public class D3D11VideoRenderer : IDisposable
 	}
 
 	private IntPtr _hwnd;
+
+	private FFmpegMediaDecoder.DecodedVideoFrame? _lastRenderedFrame;
 
 	private ID3D11Device? _d3d11Device;
 
@@ -74,6 +77,8 @@ public class D3D11VideoRenderer : IDisposable
 
 	private DateTime _lastFpsUpdateTime = DateTime.UtcNow;
 
+	private DateTime _lastPresentUtc = DateTime.MinValue;
+
 	private FFmpegMediaDecoder? _decoder;
 
 	private readonly object _renderLock = new object();
@@ -93,6 +98,14 @@ public class D3D11VideoRenderer : IDisposable
 	public double PresentedFps { get; private set; }
 
 	public double SkippedFramesPerSecond { get; private set; }
+
+	public double LastRenderedPts => _lastRenderedFrame?.PtsTime ?? 0.0;
+
+	public bool LastFrameIsHardware => _lastRenderedFrame?.IsD3D11 == true;
+
+	public double LastRenderTimeMs { get; private set; }
+
+	public double LastGpuUploadTimeMs { get; private set; }
 
 	public double VideoBrightness { get; set; } = 1.0;
 
@@ -116,6 +129,36 @@ public class D3D11VideoRenderer : IDisposable
 	public void EnableEnhancedShader(bool enable)
 	{
 		_useEnhancedShader = enable;
+	}
+
+	public void ResetPresentationPacing()
+	{
+		_lastPresentUtc = DateTime.MinValue;
+		_presentedFramesThisSecond = 0;
+		_skippedFramesThisSecond = 0;
+		_lastFpsUpdateTime = DateTime.UtcNow;
+	}
+
+	private void WaitForPresentationSlot()
+	{
+		double targetFps = _decoder?.TargetFps ?? 0.0;
+		if (targetFps < 24.0 || targetFps > 240.0)
+		{
+			targetFps = 60.0;
+		}
+		double minIntervalMs = 1000.0 / targetFps;
+		DateTime deadline = (_lastPresentUtc == DateTime.MinValue)
+			? DateTime.UtcNow
+			: _lastPresentUtc.AddMilliseconds(minIntervalMs);
+		while (DateTime.UtcNow < deadline)
+		{
+			double remainingMs = (deadline - DateTime.UtcNow).TotalMilliseconds;
+			if (remainingMs <= 0.5)
+			{
+				break;
+			}
+			Thread.Sleep(remainingMs > 2.0 ? 1 : 0);
+		}
 	}
 
 	private void InitializeD3D()
@@ -257,6 +300,12 @@ public class D3D11VideoRenderer : IDisposable
 	[DllImport("user32.dll")]
 	private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
+	[DllImport("winmm.dll")]
+	private static extern uint timeBeginPeriod(uint uMilliseconds);
+
+	[DllImport("winmm.dll")]
+	private static extern uint timeEndPeriod(uint uMilliseconds);
+
 	private void ResetSize()
 	{
 		if (_swapChain == null || _d3d11Device == null)
@@ -286,6 +335,7 @@ public class D3D11VideoRenderer : IDisposable
 
 	private void RenderLoop()
 	{
+		timeBeginPeriod(1u);
 		try
 		{
 			while (!_isDisposed)
@@ -317,16 +367,18 @@ public class D3D11VideoRenderer : IDisposable
 				FFmpegMediaDecoder.DecodedVideoFrame decodedVideoFrame = _decoder.PullVideoFrame(masterClockPts);
 				if (decodedVideoFrame != null)
 				{
+					WaitForPresentationSlot();
 					try
 					{
 						RenderFrameInternal(decodedVideoFrame);
-						_swapChain?.Present(1u, PresentFlags.None);
+						// Pacing is handled by WaitForPresentationSlot; avoid DXGI vsync capping 60p on 50Hz displays.
+						_swapChain?.Present(0u, PresentFlags.None);
+						_lastPresentUtc = DateTime.UtcNow;
 						_presentedFramesThisSecond++;
+						_lastRenderedFrame?.Dispose();
+						_lastRenderedFrame = decodedVideoFrame;
 					}
 					catch (Exception)
-					{
-					}
-					finally
 					{
 						decodedVideoFrame.Dispose();
 					}
@@ -340,6 +392,10 @@ public class D3D11VideoRenderer : IDisposable
 		}
 		catch (Exception)
 		{
+		}
+		finally
+		{
+			timeEndPeriod(1u);
 		}
 	}
 
@@ -358,6 +414,7 @@ public class D3D11VideoRenderer : IDisposable
 
 	private void RenderFrameInternal(FFmpegMediaDecoder.DecodedVideoFrame frame)
 	{
+		Stopwatch renderTimer = Stopwatch.StartNew();
 		lock (_renderLock)
 		{
 			ResetSize();
@@ -365,14 +422,20 @@ public class D3D11VideoRenderer : IDisposable
 			{
 				if (frame.IsD3D11 && frame.TexturePtr != IntPtr.Zero)
 				{
+					LastGpuUploadTimeMs = 0.0;
 					RenderHardwareTexture(frame.TexturePtr, frame.SliceIndexOrStride, frame.Width, frame.Height);
 				}
 				else if (frame.BgraBuffer != null && frame.BgraPointer != IntPtr.Zero)
 				{
+					Stopwatch uploadTimer = Stopwatch.StartNew();
 					RenderSoftwareBuffer(frame.BgraPointer, frame.SliceIndexOrStride, frame.Width, frame.Height);
+					uploadTimer.Stop();
+					LastGpuUploadTimeMs = uploadTimer.Elapsed.TotalMilliseconds;
 				}
 			}
 		}
+		renderTimer.Stop();
+		LastRenderTimeMs = renderTimer.Elapsed.TotalMilliseconds;
 	}
 
 	private unsafe void RenderSoftwareBuffer(IntPtr data, int stride, int width, int height)
@@ -500,12 +563,14 @@ public class D3D11VideoRenderer : IDisposable
 				_srvY = _d3d11Device.CreateShaderResourceView(_d3d11DecodeTexture, value);
 				_srvUV = _d3d11Device.CreateShaderResourceView(_d3d11DecodeTexture, value2);
 			}
+			int copyWidth = Math.Min(trueWidth, (int)description.Width);
+			int copyHeight = Math.Min(trueHeight, (int)description.Height);
 			Box box = default(Box);
 			box.Left = 0;
 			box.Top = 0;
 			box.Front = 0;
-			box.Right = trueWidth;
-			box.Bottom = trueHeight;
+			box.Right = copyWidth;
+			box.Bottom = copyHeight;
 			box.Back = 1;
 			Box value3 = box;
 			_d3d11Context.CopySubresourceRegion(_d3d11DecodeTexture, 0u, 0u, 0u, 0u, iD3D11Texture2D, (uint)sliceIndex, value3);
@@ -603,6 +668,7 @@ public class D3D11VideoRenderer : IDisposable
 			_samplerState?.Dispose();
 			_d3d11Context?.Dispose();
 			_d3d11Device?.Dispose();
+			_lastRenderedFrame?.Dispose();
 		}
 	}
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using SubtitlesParser.Classes;
 using SubtitlesParser.Classes.Parsers;
 
@@ -13,16 +14,91 @@ namespace JonPlayer
         private List<SubtitleItem> _subtitles = new List<SubtitleItem>();
         private int _lastIndex = 0;
 
+        private bool IsValidUtf8(byte[] bytes)
+        {
+            try
+            {
+                var utf8 = new UTF8Encoding(false, true);
+                utf8.GetString(bytes);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private List<SubtitleItem> ParseSmi(byte[] bytes, Encoding encoding)
+        {
+            var subs = new List<SubtitleItem>();
+            string content = encoding.GetString(bytes);
+            
+            var matches = Regex.Matches(content, @"(?i)<SYNC\s+Start\s*=\s*([0-9]+)\s*>(.*?)((?=<SYNC)|$)", RegexOptions.Singleline);
+            
+            foreach (Match match in matches)
+            {
+                if (match.Groups.Count >= 3)
+                {
+                    if (int.TryParse(match.Groups[1].Value, out int startMs))
+                    {
+                        string text = match.Groups[2].Value;
+                        text = Regex.Replace(text, @"(?i)<br\s*/?>", Environment.NewLine);
+                        text = Regex.Replace(text, @"<[^>]+>", "");
+                        text = text.Replace("&nbsp;", " ").Trim();
+                        
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            subs.Add(new SubtitleItem
+                            {
+                                StartTime = startMs,
+                                EndTime = startMs + 5000,
+                                Lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).ToList()
+                            });
+                        }
+                    }
+                }
+            }
+            
+            for (int i = 0; i < subs.Count - 1; i++)
+            {
+                subs[i].EndTime = subs[i + 1].StartTime;
+            }
+
+            return subs;
+        }
+
         public bool LoadSubtitle(string filePath)
         {
             try
             {
                 if (!File.Exists(filePath)) return false;
 
-                var parser = new SubParser();
-                using (var stream = File.OpenRead(filePath))
+                Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
+                byte[] bytes = File.ReadAllBytes(filePath);
+                Encoding encoding = Encoding.UTF8;
+                
+                // BOM check
+                if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
                 {
-                    _subtitles = parser.ParseStream(stream, Encoding.UTF8);
+                    encoding = Encoding.UTF8;
+                }
+                else if (!IsValidUtf8(bytes))
+                {
+                    encoding = Encoding.GetEncoding("euc-kr");
+                }
+
+                if (filePath.EndsWith(".smi", StringComparison.OrdinalIgnoreCase))
+                {
+                    _subtitles = ParseSmi(bytes, encoding);
+                }
+                else
+                {
+                    var parser = new SubParser();
+                    using (var stream = new MemoryStream(bytes))
+                    {
+                        _subtitles = parser.ParseStream(stream, encoding);
+                    }
                 }
                 
                 // Sort by start time just in case
@@ -61,9 +137,6 @@ namespace JonPlayer
             };
             
             _subtitles.Add(item);
-            // In a strict streaming scenario, it's mostly sequential, but just in case:
-            // Actually, we don't need to sort every time if it's appended sequentially.
-            // But doing a small insertion sort logic or just letting it be is fine.
         }
 
         public bool HasSubtitles => _subtitles != null && _subtitles.Count > 0;
@@ -91,10 +164,8 @@ namespace JonPlayer
         {
             if (!HasSubtitles) return string.Empty;
 
-            // Sequential search optimized for linear playback
             if (_lastIndex >= _subtitles.Count) _lastIndex = 0;
 
-            // If time went backwards or skipped way ahead, reset search
             if (_lastIndex > 0 && timeMs < _subtitles[_lastIndex - 1].StartTime)
             {
                 _lastIndex = 0;
@@ -106,14 +177,11 @@ namespace JonPlayer
                 if (timeMs >= item.StartTime && timeMs <= item.EndTime)
                 {
                     _lastIndex = i;
-                    // Join multiple lines and return
                     return string.Join(Environment.NewLine, item.Lines);
                 }
                 
                 if (item.StartTime > timeMs)
                 {
-                    // We passed the current time without finding a match, 
-                    // which means there is no subtitle right now.
                     _lastIndex = i;
                     break;
                 }

@@ -14,8 +14,7 @@
         AllowDrop="True"
         DragOver="Window_DragOver"
         Drop="Window_Drop"
-        Closing="MainWindow_Closing"
-        PreviewKeyDown="Window_PreviewKeyDown">
+        Closing="MainWindow_Closing">
 
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="40"
@@ -598,43 +597,48 @@
                 </Image>
             </Viewbox>
             <Rectangle x:Name="SplashBackground" Fill="Black" Visibility="{Binding Visibility, ElementName=ImgSplash}"/>
-            <Image x:Name="ImgSplash" Stretch="None" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+            <Viewbox x:Name="SplashViewbox" Stretch="Uniform" StretchDirection="DownOnly" Margin="40">
+                <Image x:Name="ImgSplash" Stretch="None" Source="Assets/BG logo.png" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+            </Viewbox>
             <Image x:Name="ImgYoutubeThumbnail" Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed"/>
 
             <Grid x:Name="AudioUI" Visibility="Collapsed">
-                <Image x:Name="AudioCoverBackground" Stretch="UniformToFill">
+                <Image x:Name="AudioCoverBackground" Visibility="Collapsed"/>
+                <Image Source="{Binding Source, ElementName=AudioCoverBackground}" Stretch="UniformToFill" VerticalAlignment="Center" HorizontalAlignment="Center">
                     <Image.Effect>
                         <BlurEffect Radius="50" KernelType="Gaussian"/>
                     </Image.Effect>
                 </Image>
                 <Rectangle Fill="#88000000"/> 
                 <Canvas x:Name="AudioNotesCanvas" IsHitTestVisible="False"/>
-                <Grid VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,60">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    
-                    <Border CornerRadius="12" Margin="0,0,0,30" HorizontalAlignment="Center">
-                        <Border.Effect>
-                            <DropShadowEffect BlurRadius="20" ShadowDepth="10" Opacity="0.5" Direction="270"/>
-                        </Border.Effect>
-                        <Grid>
-                            <Rectangle Fill="#22FFFFFF" RadiusX="12" RadiusY="12"/>
-                            <Image x:Name="AudioCoverForeground" Width="250" Height="250" Stretch="UniformToFill">
-                                <Image.Clip>
-                                    <RectangleGeometry Rect="0,0,250,250" RadiusX="12" RadiusY="12"/>
-                                </Image.Clip>
-                            </Image>
-                        </Grid>
-                    </Border>
-                    
-                    <TextBlock x:Name="TxtAudioTitle" Grid.Row="1" Text="" Foreground="White" FontSize="28" FontWeight="Bold" FontFamily="Montserrat" HorizontalAlignment="Center" Margin="0,0,0,5" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="600"/>
-                    <TextBlock x:Name="TxtAudioArtist" Grid.Row="2" Text="" Foreground="#DDDDDD" FontSize="18" FontWeight="Medium" FontFamily="Montserrat" HorizontalAlignment="Center" Margin="0,0,0,5" MaxWidth="600" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock x:Name="TxtAudioAlbum" Grid.Row="3" Text="" Foreground="#AAAAAA" FontSize="14" FontFamily="Montserrat" HorizontalAlignment="Center" MaxWidth="600" TextTrimming="CharacterEllipsis"/>
-                </Grid>
+                <Viewbox x:Name="AudioUIViewbox" Stretch="Uniform" StretchDirection="DownOnly" Margin="20">
+                    <Grid x:Name="AudioUIGrid" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,60">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        
+                        <Border CornerRadius="12" Margin="0,0,0,30" HorizontalAlignment="Center">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="20" ShadowDepth="10" Opacity="0.5" Direction="270"/>
+                            </Border.Effect>
+                            <Grid>
+                                <Rectangle Fill="#22FFFFFF" RadiusX="12" RadiusY="12"/>
+                                <Image x:Name="AudioCoverForeground" Width="250" Height="250" Stretch="UniformToFill">
+                                    <Image.Clip>
+                                        <RectangleGeometry Rect="0,0,250,250" RadiusX="12" RadiusY="12"/>
+                                    </Image.Clip>
+                                </Image>
+                            </Grid>
+                        </Border>
+                        
+                        <TextBlock x:Name="TxtAudioTitle" Grid.Row="1" Text="" Foreground="White" FontSize="28" FontWeight="Bold" FontFamily="Montserrat" HorizontalAlignment="Center" Margin="0,0,0,5" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="600"/>
+                        <TextBlock x:Name="TxtAudioArtist" Grid.Row="2" Text="" Foreground="#DDDDDD" FontSize="18" FontWeight="Medium" FontFamily="Montserrat" HorizontalAlignment="Center" Margin="0,0,0,5" MaxWidth="600" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock x:Name="TxtAudioAlbum" Grid.Row="3" Text="" Foreground="#AAAAAA" FontSize="14" FontFamily="Montserrat" HorizontalAlignment="Center" MaxWidth="600" TextTrimming="CharacterEllipsis"/>
+                    </Grid>
+                </Viewbox>
             </Grid>
 
             <Rectangle x:Name="MouseLayer" Fill="#01000000" IsHitTestVisible="True" Margin="6" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
@@ -642,6 +646,27 @@
             <Button x:Name="BtnPlayPausePip" HorizontalAlignment="Center" VerticalAlignment="Center" Width="56" Height="56" Style="{StaticResource KnobButton}" ToolTip="Play/Pause" Click="BtnPlayPause_Click" Visibility="Collapsed" Panel.ZIndex="90">
                 <Path x:Name="PlayPauseIconPathPip" Data="{StaticResource PlayIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="22" Height="22" Stretch="Uniform"/>
             </Button>
+
+            <!-- PIP minimal controls (YouTube-like on hover) -->
+            <!-- Top-right close -->
+            <Border x:Name="PipTopBar" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="6" Background="#AA000000" CornerRadius="3" Padding="2" Panel.ZIndex="95" Visibility="Collapsed">
+                <Button x:Name="BtnClosePip" Width="20" Height="20" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="13" FontWeight="Bold" ToolTip="Close" Click="BtnClosePip_Click" Cursor="Hand" Content="✕" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+            </Border>
+
+            <!-- Bottom minimal bar: Prev / Mute / Next -->
+            <Border x:Name="PipBottomBar" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="6" Background="#AA000000" CornerRadius="10" Padding="4,2" Panel.ZIndex="95" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="BtnPrevPip" Width="24" Height="24" Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="1,0">
+                        <Path Data="{StaticResource PrevIcon}" Fill="White" Width="11" Height="11" Stretch="Uniform"/>
+                    </Button>
+                    <Button x:Name="BtnMutePip" Width="24" Height="24" Style="{StaticResource KnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="1,0">
+                        <Path x:Name="MuteIconPathPip" Data="{StaticResource VolumeHighIcon}" Fill="White" Width="11" Height="11" Stretch="Uniform"/>
+                    </Button>
+                    <Button x:Name="BtnNextPip" Width="24" Height="24" Style="{StaticResource KnobButton}" ToolTip="Next" Click="BtnNext_Click" Margin="1,0">
+                        <Path Data="{StaticResource NextIcon}" Fill="White" Width="11" Height="11" Stretch="Uniform"/>
+                    </Button>
+                </StackPanel>
+            </Border>
 
             <!-- Subtitle UI -->
             <Border x:Name="SubtitleBorder" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="20,0,20,20" Background="#A0000000" CornerRadius="8" Padding="16,8" IsHitTestVisible="True" Panel.ZIndex="50" Visibility="Collapsed" MouseLeftButtonDown="SubtitleBorder_MouseLeftButtonDown" MouseLeftButtonUp="SubtitleBorder_MouseLeftButtonUp" MouseMove="SubtitleBorder_MouseMove" Cursor="SizeAll">
@@ -679,7 +704,10 @@
             </Border>
 
             <Border x:Name="OverlayStats" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="10" Background="#CC000000" CornerRadius="5" IsHitTestVisible="False" Visibility="Collapsed" Panel.ZIndex="100">
-                <TextBlock x:Name="TxtOverlayStats" Foreground="#00FF00" FontFamily="Consolas" FontSize="12" LineHeight="18" Text="Stats..." />
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock x:Name="TxtOverlayStatsLeft" Foreground="#00FF00" FontFamily="Consolas" FontSize="12" LineHeight="18" Text="Stats..." Margin="0,0,20,0" />
+                    <TextBlock x:Name="TxtOverlayStatsRight" Foreground="#00FF00" FontFamily="Consolas" FontSize="12" LineHeight="18" Text="" />
+                </StackPanel>
             </Border>
 
             <!-- Toast UI for Notifications -->
@@ -1317,10 +1345,10 @@
                             <Button Grid.Column="1" x:Name="BtnMuteFS" Style="{StaticResource KnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
                                 <Path x:Name="MuteIconPathFS" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                             </Button>
-                            <Slider Grid.Column="2" x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <Slider Grid.Column="2" x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="50" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
                             
                             <StackPanel Grid.Column="3" Orientation="Horizontal">
-                                <Button x:Name="BtnBassFS" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center" Tag="On">
+                                <Button x:Name="BtnBassFS" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center">
                                     <Button.Template>
                                         <ControlTemplate TargetType="Button">
                                             <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
@@ -1471,11 +1499,11 @@
                         <Button Grid.Column="1" x:Name="BtnMute" Style="{StaticResource KnobButton}" ToolTip="Mute/Unmute (M)" Click="BtnMute_Click" Margin="0,0,5,0">
                             <Path x:Name="MuteIconPath" Data="{StaticResource VolumeHighIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                         </Button>
-                        <Slider Grid.Column="2" x:Name="SliderVolume" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="80" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                        <Slider Grid.Column="2" x:Name="SliderVolume" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="50" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,14,0"/>
                         
                         <StackPanel Grid.Column="3" Orientation="Horizontal">
                             <Border Width="1" Height="20" Background="{DynamicResource DividerBrush}" Margin="0,0,14,0"/>
-                            <Button x:Name="BtnBass" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center" Tag="On">
+                            <Button x:Name="BtnBass" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center">
                                 <Button.Template>
                                     <ControlTemplate TargetType="Button">
                                         <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">

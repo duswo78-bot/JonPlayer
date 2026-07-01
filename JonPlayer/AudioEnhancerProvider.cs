@@ -38,8 +38,8 @@ namespace JonPlayer
 
                 for (int i = 0; i < 2; i++)
                 {
-                    _bassFilters[i]   = BiQuadFilter.LowShelf(sampleRate, 100, 0.7f, 8f);
-                    _trebleFilters[i] = BiQuadFilter.HighShelf(sampleRate, 8000, 0.7f, 3f);
+                    _bassFilters[i]   = BiQuadFilter.LowShelf(sampleRate, 100, 0.7f, 5.0f);  // +14dB 정도 저음 부스트
+                    _trebleFilters[i] = BiQuadFilter.HighShelf(sampleRate, 8000, 0.7f, 2f);
                 }
             }
         }
@@ -69,27 +69,64 @@ namespace JonPlayer
                 float left  = buffer[offset + i];
                 float right = buffer[offset + i + 1];
 
-                // Apply smoothly interpolated volume multiplier
-                left *= _currentVolumeMultiplier;
+                // 입력 보호 (NaN/Inf 방지)
+                if (float.IsNaN(left) || float.IsInfinity(left)) left = 0;
+                if (float.IsNaN(right) || float.IsInfinity(right)) right = 0;
+
+                // 과도한 값은 clamp (0으로 세팅하면 클릭 발생)
+                left = Math.Max(-8.0f, Math.Min(8.0f, left));
+                right = Math.Max(-8.0f, Math.Min(8.0f, right));
+
+                // 전체 BaselineVolumeMultiplier 적용 (Bass+ 켜도 자동 볼륨 게인을 억제하지 않음)
+                left  *= _currentVolumeMultiplier;
                 right *= _currentVolumeMultiplier;
 
-                // [1단계] EQ : Low Shelf → High Shelf 순서로 직렬 적용
+                // ✅ 3. EQ
                 left  = _trebleFilters[0].Transform(_bassFilters[0].Transform(left));
                 right = _trebleFilters[1].Transform(_bassFilters[1].Transform(right));
 
-                // [2단계] 스테레오 와이드닝 : Mid/Side 분리 후 Side 30% 증폭
+                // ✅ 4. Stereo widening (약하게)
                 float mid  = (left + right) / 2.0f;
                 float side = (left - right) / 2.0f;
-                side *= 1.3f;
+                side *= 1.1f;
+
                 left  = mid + side;
                 right = mid - side;
 
-                // [3단계] Soft Clipping : Tanh로 -1~+1 범위 내 자연스럽게 포화
-                buffer[offset + i]     = (float)Math.Tanh(left);
-                buffer[offset + i + 1] = (float)Math.Tanh(right);
+                // 5. 돌발 노이즈(Glitch) 억제 (너무 aggressive하지 않게)
+                float energyTotal = Math.Abs(left) + Math.Abs(right);
+                if (energyTotal > 8.0f)
+                {
+                    float atten = 8.0f / energyTotal;
+                    left *= atten;
+                    right *= atten;
+                }
+
+                // ✅ 6. 안전 Limiter
+                buffer[offset + i]     = SoftLimiter(left);
+                buffer[offset + i + 1] = SoftLimiter(right);
             }
 
             return samplesRead;
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static float SoftLimiter(float x)
+        {
+            // 개선된 소프트 리미터: |x|<=1 구간은 기존 cubic, 그 이상은 부드럽게 접근
+            const float hard = 1.0f;
+            const float maxOut = 0.98f;
+
+            if (x <= hard && x >= -hard)
+            {
+                return 1.5f * x - 0.5f * x * x * x;
+            }
+
+            // |x| > 1 영역: tanh로 소프트하게 포화
+            float sign = x < 0 ? -1f : 1f;
+            float excess = Math.Abs(x) - hard;
+            float soft = hard + (float)Math.Tanh(excess * 2.5f) * (maxOut - hard);
+            return sign * soft;
         }
     }
 }

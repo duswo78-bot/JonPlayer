@@ -60,6 +60,18 @@ Name: "{commondesktop}\JonPlayer"; Filename: "{app}\JonPlayerApp.exe"; IconFilen
 Root: HKCU; Subkey: "Software\JonPlayer"; ValueType: dword; ValueName: "WhisperInstalled"; ValueData: "1"; Components: whisper; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\JonPlayer"; ValueType: dword; ValueName: "WhisperInstalled"; ValueData: "0"; Components: not whisper; Flags: uninsdeletevalue
 
+; Custom URL Protocol for jonplayer://
+Root: HKCR; Subkey: "jonplayer"; ValueType: string; ValueName: ""; ValueData: "URL:JonPlayer Protocol"; Flags: uninsdeletekey
+Root: HKCR; Subkey: "jonplayer"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Flags: uninsdeletekey
+Root: HKCR; Subkey: "jonplayer\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\JonPlayerApp.exe,0"
+Root: HKCR; Subkey: "jonplayer\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\JonPlayerApp.exe"" ""%1"""
+
+; Custom URL Protocol for jonplayer-pip://
+Root: HKCR; Subkey: "jonplayer-pip"; ValueType: string; ValueName: ""; ValueData: "URL:JonPlayer PIP Protocol"; Flags: uninsdeletekey
+Root: HKCR; Subkey: "jonplayer-pip"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Flags: uninsdeletekey
+Root: HKCR; Subkey: "jonplayer-pip\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\JonPlayerApp.exe,0"
+Root: HKCR; Subkey: "jonplayer-pip\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\JonPlayerApp.exe"" ""%1"""
+
 ; File associations
 Root: HKCR; Subkey: "JonPlayer.Media"; ValueType: string; ValueName: ""; ValueData: "JonPlayer Media File"; Flags: uninsdeletekey; Tasks: fileassoc
 Root: HKCR; Subkey: "JonPlayer.Media\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\JonPlayerApp.exe,0"; Tasks: fileassoc

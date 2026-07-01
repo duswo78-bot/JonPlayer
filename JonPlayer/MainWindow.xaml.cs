@@ -161,6 +161,9 @@ namespace JonPlayer
         private FFmpegMediaDecoder? _decoder;
         
         private WaveOutEvent? _waveOut;
+        private bool _userWantsPlayback = true;
+        private long _lastPlayPauseToggleUtcTicks;
+        private const int PlayPauseToggleDebounceMs = 150;
         private BufferedWaveProvider? _waveProvider;
         private AudioEnhancerProvider? _audioEnhancer;
         private Thread? _uiUpdateThread;
@@ -168,7 +171,9 @@ namespace JonPlayer
         private bool _isUserDraggingSlider;
         private bool _isUpdatingFromPlayer;
         private bool _isSeeking;
+        private bool _allowTimelineBackward;
         private bool _suppressTimelineSeek;
+        private double _pendingSeekSubtitleMs = -1.0;
         private int _streamingSeekGeneration;
         private int _openGeneration;
         private bool _isClosing;
@@ -190,14 +195,13 @@ namespace JonPlayer
 
         private DispatcherTimer _fsMousePollTimer;
         private DispatcherTimer _statsTimer;
+        private DispatcherTimer _subtitleTimer;
         private DispatcherTimer _toastTimer;
 
         // Stats Overlay
         private int _openCount = 0;
         private int _seekCount = 0;
-        private Stopwatch _renderTimer = new Stopwatch();
-        private double _totalRenderTimeMs = 0;
-        private int _renderSamples = 0;
+        private int _audioUnderrunCount = 0;
         private TimeSpan _lastCpuTime;
         private DateTime _lastCpuCheckTime;
 
@@ -205,6 +209,7 @@ namespace JonPlayer
 
         private bool _isMouseOverFsStrip;
         private bool _isMouseOverFsExitBadge;
+        private Point _lastPolledMousePos = new Point(double.NaN, double.NaN);
 
         private static bool IsStreamingPath(string? path)
         {
@@ -407,13 +412,17 @@ namespace JonPlayer
             _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _statsTimer.Tick += StatsTimer_Tick;
 
+            _subtitleTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _subtitleTimer.Tick += SubtitleTimer_Tick;
+            _subtitleTimer.Start();
+
             _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _toastTimer.Tick += (s, e) => { ToastOverlay.Visibility = Visibility.Collapsed; _toastTimer.Stop(); };
 
             _cursorHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _cursorHideTimer.Tick += (s, e) =>
             {
-                if (_isFullscreen || this.WindowState == WindowState.Maximized)
+                if (ShouldAutoHideCursor())
                 {
                     this.Cursor = System.Windows.Input.Cursors.None;
                     if (_overlayWindow != null) _overlayWindow.Cursor = System.Windows.Input.Cursors.None;
@@ -448,7 +457,7 @@ namespace JonPlayer
             {
                 var anim = new System.Windows.Media.Animation.DoubleAnimation
                 {
-                    To = FsBottomStrip.IsVisible ? -100 : 0,
+                    To = FsBottomStrip.IsVisible ? -105 : (_isFullscreen ? -5 : 0),
                     Duration = TimeSpan.FromSeconds(0.3),
                     EasingFunction = new System.Windows.Media.Animation.CubicEase { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut }
                 };
@@ -492,32 +501,30 @@ namespace JonPlayer
 
         private void ComponentDispatcher_ThreadPreprocessMessage(ref System.Windows.Interop.MSG msg, ref bool handled)
         {
+            if (handled) return;
+
             const int WM_KEYDOWN = 0x0100;
             const int WM_SYSKEYDOWN = 0x0104;
+            if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN) return;
 
-            if (!handled && (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN))
+            // Overlay PreviewKeyDown handles keys when the UI layer has focus.
+            if (_overlayWindow != null && _overlayWindow.IsActive) return;
+
+            int vk = msg.wParam.ToInt32();
+            Key key = KeyInterop.KeyFromVirtualKey(vk);
+            if (key == Key.System) key = KeyInterop.KeyFromVirtualKey(vk);
+
+            var args = new System.Windows.Input.KeyEventArgs(
+                Keyboard.PrimaryDevice,
+                PresentationSource.FromVisual(this),
+                0,
+                key)
             {
-                var key = System.Windows.Input.KeyInterop.KeyFromVirtualKey((int)msg.wParam);
-                // Do not intercept if user is typing in a TextBox
-                var focusedElement = System.Windows.Input.Keyboard.FocusedElement as System.Windows.DependencyObject;
-                if (focusedElement is System.Windows.Controls.TextBox || focusedElement is System.Windows.Controls.ComboBox)
-                    return;
+                RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent
+            };
 
-                var args = new System.Windows.Input.KeyEventArgs(
-                    System.Windows.Input.Keyboard.PrimaryDevice,
-                    System.Windows.PresentationSource.FromVisual(this) ?? new System.Windows.Interop.HwndSource(0, 0, 0, 0, 0, "", IntPtr.Zero),
-                    0, key)
-                {
-                    RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent
-                };
-                
-                Window_PreviewKeyDown(this, args);
-                
-                if (args.Handled)
-                {
-                    handled = true;
-                }
-            }
+            Window_PreviewKeyDown(this, args);
+            if (args.Handled) handled = true;
         }
 
         private void SetupOverlayWindow()
@@ -611,7 +618,8 @@ namespace JonPlayer
             };
 
             _overlayWindow.PreviewKeyDown += Window_PreviewKeyDown;
-            _overlayWindow.Closing += (s, e) => 
+            _overlayWindow.MouseMove += OverlayWindow_MouseMove;
+            _overlayWindow.Closing += (s, e) =>
             {
                 if (!_isClosing) 
                 {
@@ -638,101 +646,61 @@ namespace JonPlayer
             // This event handler should be kept empty or removed.
         }
 
-        private DateTime _lastSliderUpdate = DateTime.MinValue;
-
         private void Decoder_PositionChanged(double ratio)
         {
-            if (_isUserDraggingSlider || _isSeeking) return;
-
-            var now = DateTime.UtcNow;
-            if ((now - _lastSliderUpdate).TotalMilliseconds < 33) return;
-            _lastSliderUpdate = now;
-
-            Dispatcher.BeginInvoke(new Action(() =>
-            {
-                if (_isUserDraggingSlider || _isSeeking || _decoder == null || !_decoder.IsRunning) return;
-                _isUpdatingFromPlayer = true;
-                SliderTimeline.Value = ratio * SliderTimeline.Maximum;
-                if (SliderTimelineFS != null) SliderTimelineFS.Value = SliderTimeline.Value;
-                _isUpdatingFromPlayer = false;
-            }), DispatcherPriority.Background);
+            // Timeline is driven by UpdateTimelineFromPlayback() via master clock.
         }
 
-        private DateTime _lastTimeUpdate = DateTime.MinValue;
-
-        private void Decoder_TimeUpdated(TimeSpan current, TimeSpan total)
+        private void UpdateTimelineFromPlayback()
         {
-            var now = DateTime.UtcNow;
-            if ((now - _lastTimeUpdate).TotalMilliseconds < 100) return;
-            _lastTimeUpdate = now;
+            if (_isUserDraggingSlider || _isSeeking || _decoder == null || !_decoder.IsRunning) return;
 
-            Dispatcher.BeginInvoke(new Action(() =>
+            double durationMs = _decoder.DurationSeconds * 1000.0;
+            if (durationMs <= 0 || SliderTimeline == null) return;
+
+            double masterClockMs = _decoder.GetCurrentTimeMs();
+            double newSliderValue = masterClockMs / durationMs * SliderTimeline.Maximum;
+
+            // Block small backward jumps from audio-sync correction or out-of-order video PTS events.
+            if (!_allowTimelineBackward && newSliderValue + 1.0 < SliderTimeline.Value)
             {
-                if (_isSeeking || _decoder == null || !_decoder.IsRunning) return;
-                TxtCurrentTime.Text = current.ToString(@"hh\:mm\:ss");
-                
-                var remaining = total - current;
-                if (remaining.TotalSeconds < 0) remaining = TimeSpan.Zero;
-                TxtTotalTime.Text = "-" + remaining.ToString(@"hh\:mm\:ss");
-                
-                if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = TxtCurrentTime.Text;
-                if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = TxtTotalTime.Text;
+                return;
+            }
+            _allowTimelineBackward = false;
 
-                // Subtitle Update
-                if (_subtitlesEnabled && _subtitleManager.HasSubtitles)
-                {
-                    if (BtnTranslate.Visibility != Visibility.Visible)
-                    {
-                        BtnTranslate.Visibility = Visibility.Visible;
-                        if (BtnTranslateFS != null) BtnTranslateFS.Visibility = Visibility.Visible;
-                    }
+            _isUpdatingFromPlayer = true;
+            SliderTimeline.Value = newSliderValue;
+            if (SliderTimelineFS != null) SliderTimelineFS.Value = newSliderValue;
+            _isUpdatingFromPlayer = false;
 
-                    string subText = _subtitleManager.GetSubtitleText((int)current.TotalMilliseconds);
-                    if (!string.IsNullOrEmpty(subText))
-                    {
-                        string detectedLang = _subtitleManager.DetectLanguage();
-                        string displayLang = _isTranslationEnabled ? (detectedLang == "KR" ? "EN" : "KR") : detectedLang;
-                        if (BtnTranslate.Content?.ToString() != displayLang)
-                        {
-                            BtnTranslate.Content = displayLang;
-                            if (BtnTranslateFS != null) BtnTranslateFS.Content = displayLang;
-                        }
+            var now = DateTime.UtcNow;
+            if ((now - _lastTimeUpdate).TotalMilliseconds >= 250)
+            {
+                _lastTimeUpdate = now;
+                TimeSpan current = TimeSpan.FromMilliseconds(masterClockMs);
+                TimeSpan total = TimeSpan.FromMilliseconds(durationMs);
+                if (TxtCurrentTime != null) TxtCurrentTime.Text = current.ToString(@"hh\:mm\:ss");
+                if (TxtTotalTime != null) TxtTotalTime.Text = total.ToString(@"hh\:mm\:ss");
+                if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = current.ToString(@"hh\:mm\:ss");
+                if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = total.ToString(@"hh\:mm\:ss");
+            }
+        }
 
-                        if (_isTranslationEnabled)
-                        {
-                            if (_translationCache.TryGetValue(subText, out string translated))
-                            {
-                                TxtSubtitle.Text = translated;
-                            }
-                            else
-                            {
-                                TxtSubtitle.Text = subText;
-                                _ = FetchAndApplyTranslationAsync(subText, (int)current.TotalMilliseconds);
-                            }
-                        }
-                        else
-                        {
-                            TxtSubtitle.Text = subText;
-                        }
-                        SubtitleBorder.Visibility = Visibility.Visible;
-                    }
-                    else
-                    {
-                        SubtitleBorder.Visibility = Visibility.Collapsed;
-                    }
-                }
-                else
-                {
-                    if (BtnTranslate.Visibility == Visibility.Visible)
-                    {
-                        BtnTranslate.Visibility = Visibility.Collapsed;
-                        if (BtnTranslateFS != null) BtnTranslateFS.Visibility = Visibility.Collapsed;
-                        _isTranslationEnabled = false;
-                        BtnTranslate.Tag = null;
-                        if (BtnTranslateFS != null) BtnTranslateFS.Tag = null;
-                    }
-                    SubtitleBorder.Visibility = Visibility.Collapsed;
-                }
+        private void SubtitleTimer_Tick(object? sender, EventArgs e)
+        {
+            if (_decoder == null || !_decoder.IsRunning) return;
+
+            if (_decoder.IsPaused) return;
+
+            UpdateTimelineFromPlayback();
+
+            double masterClockMs = _isSeeking && _pendingSeekSubtitleMs >= 0.0
+                ? _pendingSeekSubtitleMs
+                : _decoder.GetCurrentTimeMs();
+            TimeSpan current = TimeSpan.FromMilliseconds(masterClockMs);
+            TimeSpan total = TimeSpan.FromMilliseconds(_decoder.DurationSeconds * 1000.0);
+
+            UpdateSubtitleAt((int)current.TotalMilliseconds);
 
                 // Handle Next Video Overlay
                 if (!_isShuffle && _playlist.Count > 1 && _playlistIndex >= 0)
@@ -770,7 +738,64 @@ namespace JonPlayer
                 {
                     if (NextVideoOverlay != null) NextVideoOverlay.Visibility = Visibility.Collapsed;
                 }
-            }), DispatcherPriority.Background);
+        }
+
+        private void UpdateSubtitleAt(int timeMs)
+        {
+            if (_subtitlesEnabled && _subtitleManager.HasSubtitles)
+            {
+                if (BtnTranslate.Visibility != Visibility.Visible)
+                {
+                    BtnTranslate.Visibility = Visibility.Visible;
+                    if (BtnTranslateFS != null) BtnTranslateFS.Visibility = Visibility.Visible;
+                }
+
+                string subText = _subtitleManager.GetSubtitleText(timeMs);
+                if (!string.IsNullOrEmpty(subText))
+                {
+                    string detectedLang = _subtitleManager.DetectLanguage();
+                    string displayLang = _isTranslationEnabled ? (detectedLang == "KR" ? "EN" : "KR") : detectedLang;
+                    if (BtnTranslate.Content?.ToString() != displayLang)
+                    {
+                        BtnTranslate.Content = displayLang;
+                        if (BtnTranslateFS != null) BtnTranslateFS.Content = displayLang;
+                    }
+
+                    if (_isTranslationEnabled)
+                    {
+                        if (_translationCache.TryGetValue(subText, out string translated))
+                        {
+                            if (TxtSubtitle.Text != translated) TxtSubtitle.Text = translated;
+                        }
+                        else
+                        {
+                            if (TxtSubtitle.Text != subText) TxtSubtitle.Text = subText;
+                            _ = FetchAndApplyTranslationAsync(subText, timeMs);
+                        }
+                    }
+                    else
+                    {
+                        if (TxtSubtitle.Text != subText) TxtSubtitle.Text = subText;
+                    }
+                    SubtitleBorder.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    SubtitleBorder.Visibility = Visibility.Collapsed;
+                }
+            }
+            else
+            {
+                if (BtnTranslate.Visibility == Visibility.Visible)
+                {
+                    BtnTranslate.Visibility = Visibility.Collapsed;
+                    if (BtnTranslateFS != null) BtnTranslateFS.Visibility = Visibility.Collapsed;
+                    _isTranslationEnabled = false;
+                    BtnTranslate.Tag = null;
+                    if (BtnTranslateFS != null) BtnTranslateFS.Tag = null;
+                }
+                SubtitleBorder.Visibility = Visibility.Collapsed;
+            }
         }
 
         private void Window_StateChanged(object? sender, EventArgs e)
@@ -806,9 +831,20 @@ namespace JonPlayer
                 return;
             }
 
+            // MP3/audio-only: MouseLayer covers album art and toggled pause on any click.
+            if (AudioUI != null && AudioUI.Visibility == Visibility.Visible)
+            {
+                if (e.ClickCount == 1 && _decoder != null)
+                {
+                    TogglePlayPause("audio-click");
+                    e.Handled = true;
+                }
+                return;
+            }
+
             if (e.ClickCount == 1 && _decoder != null)
             {
-                TogglePlayPause();
+                TogglePlayPause("video-click");
                 e.Handled = true;
             }
         }
@@ -823,6 +859,34 @@ namespace JonPlayer
             SetPipHoverOverlayVisible(false);
         }
 
+        private bool ShouldAutoHideCursor()
+            => _isFullscreen || (WindowState == WindowState.Maximized && !_isPipMode);
+
+        private void NotifyMouseActivity()
+        {
+            if (this.Cursor != System.Windows.Input.Cursors.Arrow) this.Cursor = System.Windows.Input.Cursors.Arrow;
+            if (_overlayWindow != null && _overlayWindow.Cursor != System.Windows.Input.Cursors.Arrow) _overlayWindow.Cursor = System.Windows.Input.Cursors.Arrow;
+            if (_videoHwndHost != null && _videoHwndHost.HideCursor) _videoHwndHost.HideCursor = false;
+
+            if (!ShouldAutoHideCursor()) return;
+
+            _cursorHideTimer.Stop();
+            _cursorHideTimer.Start();
+        }
+
+        private void RestoreVisibleCursor()
+        {
+            this.Cursor = System.Windows.Input.Cursors.Arrow;
+            if (_overlayWindow != null) _overlayWindow.Cursor = System.Windows.Input.Cursors.Arrow;
+            if (_videoHwndHost != null) _videoHwndHost.HideCursor = false;
+            _cursorHideTimer.Stop();
+        }
+
+        private void OverlayWindow_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            NotifyMouseActivity();
+        }
+
         // 전체화면 마우스 위치 추적 및 팝업 표시
         private void FsMousePollTimer_Tick(object? sender, EventArgs e)
         {
@@ -831,6 +895,14 @@ namespace JonPlayer
             try 
             {
                 Point pos = Mouse.GetPosition(VideoGrid);
+                if (double.IsNaN(_lastPolledMousePos.X)
+                    || Math.Abs(pos.X - _lastPolledMousePos.X) > 0.5
+                    || Math.Abs(pos.Y - _lastPolledMousePos.Y) > 0.5)
+                {
+                    _lastPolledMousePos = pos;
+                    NotifyMouseActivity();
+                }
+
                 double w = VideoGrid.ActualWidth;
                 double h = VideoGrid.ActualHeight;
 
@@ -907,6 +979,8 @@ namespace JonPlayer
         private void BtnMinimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
         private void BtnMaximize_Click(object sender, RoutedEventArgs e) => ToggleMaximize();
         private void BtnClose_Click(object sender, RoutedEventArgs e) => Close();
+
+        private void BtnClosePip_Click(object sender, RoutedEventArgs e) => Close();
 
         private void ToggleMaximize()
         {
@@ -1513,11 +1587,7 @@ namespace JonPlayer
 
         private void Window_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
         {
-            if (this.Cursor != System.Windows.Input.Cursors.Arrow) this.Cursor = System.Windows.Input.Cursors.Arrow;
-            if (_overlayWindow != null && _overlayWindow.Cursor != System.Windows.Input.Cursors.Arrow) _overlayWindow.Cursor = System.Windows.Input.Cursors.Arrow;
-            if (_videoHwndHost != null && _videoHwndHost.HideCursor) _videoHwndHost.HideCursor = false;
-            _cursorHideTimer.Stop();
-            _cursorHideTimer.Start();
+            NotifyMouseActivity();
         }
 
         private void Window_Drop(object sender, System.Windows.DragEventArgs e)
@@ -1621,6 +1691,7 @@ namespace JonPlayer
             // when decoder thread waits for UI and UI waits for decoder.Stop()/Join()
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                _userWantsPlayback = false;
                 UpdatePlayPauseUI(false);
                 if (!PlayNext())
                 {
@@ -1670,7 +1741,6 @@ namespace JonPlayer
             decoder.FrameDecoded -= Decoder_FrameDecoded;
             decoder.AudioDataAvailable -= Decoder_AudioDataAvailable;
             decoder.PositionChanged -= Decoder_PositionChanged;
-            decoder.TimeUpdated -= Decoder_TimeUpdated;
             decoder.RotationDetected -= Decoder_RotationDetected;
             decoder.SeekInitiated -= Decoder_SeekInitiated;
             decoder.SeekPerformed -= Decoder_SeekPerformed;
@@ -1696,6 +1766,9 @@ namespace JonPlayer
         {
             if (_isClosing) return;
 
+            // Apply current user HW/SW preference (F4 toggle) before every open. Keeps existing fallback logic inside decoder.
+            FFmpegMediaDecoder.EnableHwAccel = !_forceSoftwareDecode;
+
             bool isUrl = IsStreamingPath(path);
             string displayName = GetNowPlayingDisplayName(path);
             int openGeneration = Interlocked.Increment(ref _openGeneration);
@@ -1704,6 +1777,19 @@ namespace JonPlayer
                 Interlocked.Increment(ref _streamingSeekGeneration);
             }
             _isOpeningFile = true;
+            _allowTimelineBackward = true;
+
+            Dispatcher.Invoke(() =>
+            {
+                _isUpdatingFromPlayer = true;
+                double sliderPos = startRatio * 1000.0;
+                if (SliderTimeline != null) SliderTimeline.Value = sliderPos;
+                if (SliderTimelineFS != null) SliderTimelineFS.Value = sliderPos;
+                TimeSpan startTime = TimeSpan.FromSeconds(startRatio * (_decoder?.DurationSeconds ?? 0.0));
+                if (TxtCurrentTime != null) TxtCurrentTime.Text = startTime.ToString(@"hh\:mm\:ss");
+                if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = startTime.ToString(@"hh\:mm\:ss");
+                _isUpdatingFromPlayer = false;
+            });
 
             FFmpegMediaDecoder? newDecoder = null;
             try
@@ -1713,6 +1799,7 @@ namespace JonPlayer
                 if (BtnWhisper != null) BtnWhisper.IsEnabled = canUseCcButton;
                 if (BtnWhisperFS != null) BtnWhisperFS.IsEnabled = canUseCcButton;
                 _openCount++;
+                _audioUnderrunCount = 0;
 
                 TxtNowPlaying.Text = isUrl ? $"Loading... {displayName}" : "Loading...";
                 
@@ -1752,7 +1839,6 @@ namespace JonPlayer
                 newDecoder.FrameDecoded += Decoder_FrameDecoded;
                 newDecoder.AudioDataAvailable += Decoder_AudioDataAvailable;
                 newDecoder.PositionChanged += Decoder_PositionChanged;
-                newDecoder.TimeUpdated += Decoder_TimeUpdated;
                 newDecoder.PlaybackFinished += Decoder_PlaybackFinished;
                 newDecoder.RotationDetected += Decoder_RotationDetected;
                 newDecoder.SeekInitiated += Decoder_SeekInitiated;
@@ -1783,6 +1869,13 @@ namespace JonPlayer
                     return;
                 }
 
+                // 오디오 전용(MP3 등) 파일의 경우 불필요한 D3D11 renderer 생성 방지 (메모리 절약)
+                if (!newDecoder.HasVideo && _renderer != null)
+                {
+                    _renderer.Dispose();
+                    _renderer = null;
+                }
+
                 if (openGeneration != Volatile.Read(ref _openGeneration))
                 {
                     DetachDecoderEvents(newDecoder);
@@ -1807,6 +1900,8 @@ namespace JonPlayer
                     }
                 });
                 
+                _renderer?.ResetPresentationPacing();
+                _userWantsPlayback = true;
                 _decoder.Play();
                 _waveOut?.Play();
                 
@@ -1817,16 +1912,29 @@ namespace JonPlayer
 
                 Dispatcher.Invoke(() => {
                     _isSeeking = false;
-                    if (SliderTimeline != null) 
+                    _pendingSeekSubtitleMs = -1.0;
+                    _allowTimelineBackward = true;
+                    _isUpdatingFromPlayer = true;
+                    double sliderPos = startRatio * 1000.0;
+                    if (SliderTimeline != null)
                     {
+                        SliderTimeline.Value = sliderPos;
                         SliderTimeline.IsEnabled = true;
                         SliderTimeline.IsHitTestVisible = true;
                     }
-                    if (SliderTimelineFS != null) 
+                    if (SliderTimelineFS != null)
                     {
+                        SliderTimelineFS.Value = sliderPos;
                         SliderTimelineFS.IsEnabled = true;
                         SliderTimelineFS.IsHitTestVisible = true;
                     }
+                    double durationSec = _decoder?.DurationSeconds ?? 0.0;
+                    TimeSpan startTime = TimeSpan.FromSeconds(startRatio * durationSec);
+                    if (TxtCurrentTime != null) TxtCurrentTime.Text = startTime.ToString(@"hh\:mm\:ss");
+                    if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = startTime.ToString(@"hh\:mm\:ss");
+                    if (TxtTotalTime != null) TxtTotalTime.Text = TimeSpan.FromSeconds(durationSec).ToString(@"hh\:mm\:ss");
+                    if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = TimeSpan.FromSeconds(durationSec).ToString(@"hh\:mm\:ss");
+                    _isUpdatingFromPlayer = false;
 
                     // Auto load subtitle if exists
                     CancelWhisperExtraction();
@@ -1890,6 +1998,7 @@ namespace JonPlayer
                     if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Visible;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
+                    if (MouseLayer != null) MouseLayer.IsHitTestVisible = true;
                 }
                 else
                 {
@@ -1897,6 +2006,7 @@ namespace JonPlayer
                     if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Visible;
+                    if (MouseLayer != null) MouseLayer.IsHitTestVisible = true;
 
                     try
                     {
@@ -2113,7 +2223,7 @@ namespace JonPlayer
             ImgSplash.Opacity = 1.0;
         }
 
-        private void BtnPlayPause_Click   (object sender, RoutedEventArgs e) => TogglePlayPause();
+        private void BtnPlayPause_Click(object sender, RoutedEventArgs e) => TogglePlayPause("button");
         private void BtnStop_Click        (object sender, RoutedEventArgs e)
         {
             Interlocked.Increment(ref _openGeneration);
@@ -2121,7 +2231,9 @@ namespace JonPlayer
             Interlocked.Increment(ref _subtitleLoadGeneration);
             _isOpeningFile = false;
             _isSeeking = false;
+            _pendingSeekSubtitleMs = -1.0;
             StopStreamingLoadingBlink();
+            _userWantsPlayback = false;
 
             var oldDecoder = _decoder;
             _decoder = null;
@@ -2209,7 +2321,13 @@ namespace JonPlayer
                     IsEnhancerEnabled = BtnBass.Tag?.ToString() == "On"
                 };
 
-                _waveOut = new WaveOutEvent { DesiredLatency = 100 };
+                _waveOut = new WaveOutEvent
+                {
+                    // 40ms is too aggressive for this decoder pipeline and can cause underruns
+                    // that sound like crackling/static when packets arrive unevenly.
+                    DesiredLatency = 160,
+                    NumberOfBuffers = 3
+                };
                 _waveOut.Init(_audioEnhancer);
                 if (SliderVolume != null)
                 {
@@ -2220,6 +2338,12 @@ namespace JonPlayer
 
         private void Decoder_AudioDataAvailable(byte[] buffer, int length)
         {
+            // Check both decoder state and our intent. This prevents data from being added
+            // right after Pause() or before Resume() is fully processed (race with decoder thread).
+            if (_decoder == null || _decoder.IsPaused || !_userWantsPlayback)
+            {
+                return;
+            }
             Volatile.Write(ref _lastAudioTicks, DateTime.UtcNow.Ticks);
             if (_waveProvider != null && _waveProvider.BufferedDuration.TotalSeconds < 4.5)
             {
@@ -2227,9 +2351,68 @@ namespace JonPlayer
             }
         }
 
-        private void TogglePlayPause()
+        private static void PauseLog(string msg)
         {
-            if (_decoder == null || _decoder.IsFinished || !_decoder.IsRunning)
+            try
+            {
+                string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "pause_debug.log");
+                File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {msg}{Environment.NewLine}");
+            }
+            catch { }
+        }
+
+        private bool TryConsumePlayPauseToggle(string source)
+        {
+            long now = DateTime.UtcNow.Ticks;
+            long last = Volatile.Read(ref _lastPlayPauseToggleUtcTicks);
+            if (last > 0 && (now - last) / TimeSpan.TicksPerMillisecond < PlayPauseToggleDebounceMs)
+            {
+                PauseLog($"[DEBOUNCE] source={source} ignored");
+                return false;
+            }
+            Volatile.Write(ref _lastPlayPauseToggleUtcTicks, now);
+            return true;
+        }
+
+        private void UserPausePlayback(string source = "internal")
+        {
+            if (_decoder == null || !_decoder.IsRunning || _decoder.IsPaused)
+            {
+                return;
+            }
+            PauseLog($"[PAUSE] source={source}");
+            _userWantsPlayback = false;
+            _decoder.Pause();
+            _waveOut?.Pause();
+
+            // Do not clear the provider on a normal pause. For audio-only files, clearing the
+            // buffer can make the decoder's EOF/drained-buffer check look like playback ended.
+            // Seek/stop paths still clear the buffer explicitly.
+
+            UpdatePlayPauseUI(false);
+        }
+
+        private void UserResumePlayback(string source = "internal")
+        {
+            if (_decoder == null || !_decoder.IsRunning || _decoder.IsPlaying)
+            {
+                return;
+            }
+            PauseLog($"[RESUME] source={source}");
+            _userWantsPlayback = true;
+            _decoder.Play();
+            _waveOut?.Play();
+            UpdatePlayPauseUI(true);
+        }
+
+        private void TogglePlayPause(string source = "unknown")
+        {
+            if (!TryConsumePlayPauseToggle(source))
+            {
+                return;
+            }
+
+            if (_decoder == null || !_decoder.IsRunning)
             {
                 if (!string.IsNullOrEmpty(_currentFilePath))
                 {
@@ -2245,15 +2428,11 @@ namespace JonPlayer
 
             if (_decoder.IsPlaying)
             {
-                _decoder.Pause();
-                _waveOut?.Pause();
-                UpdatePlayPauseUI(false);
+                UserPausePlayback(source);
             }
             else
             {
-                _decoder.Play();
-                _waveOut?.Play();
-                UpdatePlayPauseUI(true);
+                UserResumePlayback(source);
             }
         }
 
@@ -2369,6 +2548,7 @@ namespace JonPlayer
             double currentSeconds = currentRatio * totalSeconds;
             double targetSeconds = Math.Clamp(currentSeconds + offsetSeconds, 0, totalSeconds);
             double targetRatio = targetSeconds / totalSeconds;
+            _pendingSeekSubtitleMs = targetSeconds * 1000.0;
             
             _isUpdatingFromPlayer = true;
             SliderTimeline.Value = targetRatio * 1000.0;
@@ -2376,6 +2556,7 @@ namespace JonPlayer
             _isUpdatingFromPlayer = false;
 
             _isSeeking = true;
+            UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
             if (BeginStreamingSeek(targetRatio)) return;
 
             _decoder.Seek(targetRatio);
@@ -2905,12 +3086,16 @@ namespace JonPlayer
         private void SliderTimeline_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
         {
             _isUserDraggingSlider = true;
+            _isSeeking = true;
+            if (_decoder != null && _decoder.DurationSeconds > 0)
+            {
+                _pendingSeekSubtitleMs = (SliderTimeline.Value / 1000.0) * _decoder.DurationSeconds * 1000.0;
+            }
+
             if (_decoder != null && _decoder.IsPlaying)
             {
                 _wasPlayingBeforeDrag = true;
-                _decoder.Pause();
-                _waveOut?.Pause();
-                UpdatePlayPauseUI(false);
+                UserPausePlayback("timeline-drag");
             }
             else
             {
@@ -2934,9 +3119,7 @@ namespace JonPlayer
 
             if (_wasPlayingBeforeDrag && _decoder != null)
             {
-                _decoder.Play();
-                _waveOut?.Play();
-                UpdatePlayPauseUI(true);
+                UserResumePlayback("timeline-drag");
             }
 
             Dispatcher.BeginInvoke(new Action(() => _suppressTimelineSeek = false), DispatcherPriority.Background);
@@ -2971,7 +3154,16 @@ namespace JonPlayer
 
             // Only seek on direct click (not during drag — DragCompleted handles that,
             // and not when the player is updating the slider position).
-            if (!_isUserDraggingSlider && !_suppressTimelineSeek)
+            if (_isUserDraggingSlider)
+            {
+                if (_decoder != null && _decoder.DurationSeconds > 0)
+                {
+                    double targetRatio = e.NewValue / 1000.0;
+                    _pendingSeekSubtitleMs = targetRatio * _decoder.DurationSeconds * 1000.0;
+                    UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
+                }
+            }
+            else if (!_suppressTimelineSeek)
             {
                 DoSeek(e.NewValue);
             }
@@ -2991,10 +3183,13 @@ namespace JonPlayer
             if (_decoder == null || !_decoder.IsRunning)
             {
                 _isSeeking = false;
+                _pendingSeekSubtitleMs = -1.0;
                 return;
             }
             _isSeeking = true;
             double targetRatio = sliderValue / 1000.0;
+            _pendingSeekSubtitleMs = targetRatio * _decoder.DurationSeconds * 1000.0;
+            UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
             if (BeginStreamingSeek(targetRatio)) return;
 
             _decoder.Seek(targetRatio);
@@ -3043,6 +3238,7 @@ namespace JonPlayer
                 if (string.IsNullOrEmpty(streamUrl))
                 {
                     _isSeeking = false;
+                    _pendingSeekSubtitleMs = -1.0;
                     WpfMessageBox.Show("스트리밍 주소를 다시 가져올 수 없습니다.", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
@@ -3067,6 +3263,7 @@ namespace JonPlayer
                 if (!fallbackStarted)
                 {
                     _isSeeking = false;
+                    _pendingSeekSubtitleMs = -1.0;
                     WpfMessageBox.Show($"스트리밍 seek를 시작할 수 없습니다.\n{ex.Message}", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
             }
@@ -3110,13 +3307,26 @@ namespace JonPlayer
         private void Decoder_SeekInitiated()
         {
             _waveProvider?.ClearBuffer();
+            _renderer?.ResetPresentationPacing();
         }
 
         private void Decoder_SeekPerformed()
         {
             Dispatcher.BeginInvoke(() =>
             {
+                _allowTimelineBackward = true;
                 _isSeeking = false;
+                _renderer?.ResetPresentationPacing();
+                if (_decoder?.ConsumePendingAudioBufferClear() == true)
+                {
+                    _waveProvider?.ClearBuffer();
+                }
+                    if (_pendingSeekSubtitleMs >= 0.0)
+                    {
+                        UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
+                        _pendingSeekSubtitleMs = -1.0;
+                    }
+                UpdateTimelineFromPlayback();
             });
         }
 
@@ -3140,6 +3350,7 @@ namespace JonPlayer
             var geom = (Geometry)FindResource(geometryKey);
             if (MuteIconPath != null) MuteIconPath.Data = geom;
             if (MuteIconPathFS != null) MuteIconPathFS.Data = geom;
+            if (MuteIconPathPip != null) MuteIconPathPip.Data = geom;
         }
 
         private void BtnMute_Click(object sender, RoutedEventArgs e) => ToggleMute();
@@ -3163,6 +3374,7 @@ namespace JonPlayer
                 var muteGeom = (Geometry)FindResource("MuteIcon");
                 if (MuteIconPath != null) MuteIconPath.Data = muteGeom;
                 if (MuteIconPathFS != null) MuteIconPathFS.Data = muteGeom;
+                if (MuteIconPathPip != null) MuteIconPathPip.Data = muteGeom;
             }
             if (_isFullscreen) ShowFsVolumeOverlay();
         }
@@ -3222,6 +3434,7 @@ namespace JonPlayer
         }
 
         private bool _isPipMode = false;
+        private bool _forceSoftwareDecode = false;  // F4 toggle: true = force SW CPU, false = HW accel (default, existing logic)
         private WindowStyle _backupWindowStyle;
         private bool _backupTopmost;
         private Rect _backupBounds;
@@ -3251,6 +3464,33 @@ namespace JonPlayer
             {
                 _renderer.EnableEnhancedShader(_isEnhancedShaderEnabled);
                 ShowToast($"Enhanced Shader: {(_isEnhancedShaderEnabled ? "ON" : "OFF")}");
+            }
+        }
+
+        private void ToggleHwAccel()
+        {
+            _forceSoftwareDecode = !_forceSoftwareDecode;
+            FFmpegMediaDecoder.EnableHwAccel = !_forceSoftwareDecode;
+
+            string mode = _forceSoftwareDecode ? "SW (CPU)" : "HW (D3D11VA)";
+            ShowToast($"Decode: {mode} (F4)");
+
+            // Reload current *video* file to apply new decode mode (preserves approx position).
+            // Audio-only files don't use HW path, so no reload needed.
+            if (!string.IsNullOrEmpty(_currentFilePath) && _decoder != null && _decoder.HasVideo && _decoder.IsRunning)
+            {
+                double ratio = 0.0;
+                try
+                {
+                    if (_decoder.DurationSeconds > 0.05)
+                    {
+                        double posMs = _decoder.GetCurrentTimeMs();
+                        ratio = Math.Clamp(posMs / (_decoder.DurationSeconds * 1000.0), 0.0, 0.98);
+                    }
+                }
+                catch { /* ignore */ }
+
+                PlayFile(_currentFilePath, ratio);
             }
         }
 
@@ -3295,6 +3535,11 @@ namespace JonPlayer
 
             if (BtnPip != null) BtnPip.ToolTip = "Exit PIP Mode (P)";
             SetPipHoverOverlayVisible(MainGrid.IsMouseOver);
+            if (PipTopBar != null) PipTopBar.Visibility = Visibility.Visible;
+
+            // sync pip mute icon
+            int volForIcon = _isMuted ? 0 : (int)(SliderVolume?.Value ?? 50);
+            UpdateMuteIcon(volForIcon);
         }
 
         private void ExitPipMode()
@@ -3320,6 +3565,8 @@ namespace JonPlayer
             RowTimeline.Height = GridLength.Auto;
             RowControls.Height = GridLength.Auto;
             if (BtnPlayPausePip != null) BtnPlayPausePip.Visibility = Visibility.Collapsed;
+            if (PipTopBar != null) PipTopBar.Visibility = Visibility.Collapsed;
+            if (PipBottomBar != null) PipBottomBar.Visibility = Visibility.Collapsed;
             RestoreNormalPlayerLayout();
 
             if (_overlayWindow != null) _overlayWindow.IsHitTestVisible = true;
@@ -3335,6 +3582,7 @@ namespace JonPlayer
             RowTimeline.Height = new GridLength(0);
             RowControls.Height = new GridLength(0);
             if (BtnPlayPausePip != null) BtnPlayPausePip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (PipBottomBar != null) PipBottomBar.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
             ApplyPipOverlayLayout(visible);
             MainGrid.UpdateLayout();
             SyncOverlayWindowToMainWindow();
@@ -3353,10 +3601,10 @@ namespace JonPlayer
                 _statsNormalMargin = OverlayStats.Margin;
                 _statsNormalPadding = OverlayStats.Padding;
             }
-            if (TxtOverlayStats != null)
+            if (TxtOverlayStatsLeft != null)
             {
-                _statsNormalFontSize = TxtOverlayStats.FontSize;
-                _statsNormalLineHeight = TxtOverlayStats.LineHeight;
+                _statsNormalFontSize = TxtOverlayStatsLeft.FontSize;
+                _statsNormalLineHeight = TxtOverlayStatsLeft.LineHeight;
             }
         }
 
@@ -3399,10 +3647,12 @@ namespace JonPlayer
                 OverlayStats.MaxWidth = Math.Max(180, pipWidth - 12);
                 OverlayStats.MaxHeight = Math.Max(80, (this.ActualHeight > 0 ? this.ActualHeight : this.Height) - 8);
             }
-            if (TxtOverlayStats != null)
+            if (TxtOverlayStatsLeft != null)
             {
-                TxtOverlayStats.FontSize = 8;
-                TxtOverlayStats.LineHeight = 10;
+                TxtOverlayStatsLeft.FontSize = 8;
+                TxtOverlayStatsLeft.LineHeight = 10;
+                TxtOverlayStatsRight.FontSize = 8;
+                TxtOverlayStatsRight.LineHeight = 10;
             }
         }
 
@@ -3430,10 +3680,12 @@ namespace JonPlayer
                 OverlayStats.MaxWidth = double.PositiveInfinity;
                 OverlayStats.MaxHeight = double.PositiveInfinity;
             }
-            if (TxtOverlayStats != null)
+            if (TxtOverlayStatsLeft != null)
             {
-                TxtOverlayStats.FontSize = _statsNormalFontSize;
-                TxtOverlayStats.LineHeight = _statsNormalLineHeight;
+                TxtOverlayStatsLeft.FontSize = _statsNormalFontSize;
+                TxtOverlayStatsLeft.LineHeight = _statsNormalLineHeight;
+                TxtOverlayStatsRight.FontSize = _statsNormalFontSize;
+                TxtOverlayStatsRight.LineHeight = _statsNormalLineHeight;
             }
         }
 
@@ -3649,7 +3901,7 @@ namespace JonPlayer
         {
             if (_decoder != null)
             {
-                if (_decoder.IsPlaying) TogglePlayPause();
+                if (_decoder.IsPlaying) TogglePlayPause("close-file");
                 
                 await Task.Delay(50);
                 
@@ -3690,6 +3942,13 @@ namespace JonPlayer
         {
             if (_isFullscreen) return;
 
+            TitleBar.Opacity = 1.0;
+            TimelineBar.Opacity = 1.0;
+            ControlBar.Opacity = 1.0;
+            TitleBar.BeginAnimation(UIElement.OpacityProperty, null);
+            TimelineBar.BeginAnimation(UIElement.OpacityProperty, null);
+            ControlBar.BeginAnimation(UIElement.OpacityProperty, null);
+
             _isChangingFullscreen = true;
             _isFullscreen = true;
 
@@ -3702,7 +3961,7 @@ namespace JonPlayer
 
             WindowStyle  = WindowStyle.None;
             ResizeMode   = ResizeMode.NoResize;
-            
+
             WindowState  = WindowState.Normal;
             WindowState  = WindowState.Maximized;
             Topmost      = true;
@@ -3727,7 +3986,7 @@ namespace JonPlayer
                         var transform = source.CompositionTarget.TransformFromDevice;
                         Point physicalTopLeft = this.PointToScreen(new Point(0, 0));
                         Point logicalTopLeft = transform.Transform(physicalTopLeft);
-                        
+
                         _overlayWindow.Left = logicalTopLeft.X;
                         _overlayWindow.Top = logicalTopLeft.Y;
                         _overlayWindow.Width = this.ActualWidth;
@@ -3739,7 +3998,14 @@ namespace JonPlayer
                 PopupFsExit.IsOpen = false;
                 FsBottomStrip.Visibility = Visibility.Collapsed;
                 BtnFsCloseVideo.Visibility = Visibility.Visible;
+                if (FsSubtitleShift != null)
+                {
+                    FsSubtitleShift.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, null);
+                    FsSubtitleShift.Y = -5;
+                }
+                _lastPolledMousePos = new Point(double.NaN, double.NaN);
                 _fsMousePollTimer.Start();
+                NotifyMouseActivity();
             }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
@@ -3780,8 +4046,6 @@ namespace JonPlayer
                 NonClientFrameEdges = System.Windows.Shell.NonClientFrameEdges.None
             });
 
-
-
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 MainGrid.UpdateLayout();
@@ -3792,6 +4056,12 @@ namespace JonPlayer
             FsBottomStrip.Visibility = Visibility.Collapsed;
             BtnFsCloseVideo.Visibility = Visibility.Collapsed;
             _fsMousePollTimer.Stop();
+            RestoreVisibleCursor();
+            if (FsSubtitleShift != null)
+            {
+                FsSubtitleShift.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, null);
+                FsSubtitleShift.Y = 0;
+            }
         }
 
         private void BtnToggleMediaShortcuts_Click(object sender, RoutedEventArgs e)
@@ -3812,6 +4082,7 @@ namespace JonPlayer
 
         private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
+            if (e.Handled) return;
             if (e.OriginalSource is WpfTextBox || e.OriginalSource is WpfComboBox) return;
 
             bool isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
@@ -3825,7 +4096,13 @@ namespace JonPlayer
                     ShortcutsOverlay.Visibility = ShortcutsOverlay.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
                     e.Handled = true; break;
 
-                case Key.Space: TogglePlayPause(); e.Handled = true; break;
+                case Key.Space:
+                    if (!e.IsRepeat)
+                    {
+                        TogglePlayPause("space");
+                    }
+                    e.Handled = true;
+                    break;
                 case Key.Left: 
                     if (isCtrl) SeekRelative(-30);
                     else SeekRelative(-5); 
@@ -3875,7 +4152,13 @@ namespace JonPlayer
 
                 case Key.F11: ToggleFullscreen(); e.Handled = true; break;
 
-                case Key.MediaPlayPause: TogglePlayPause(); e.Handled = true; break;
+                case Key.MediaPlayPause:
+                    if (!e.IsRepeat)
+                    {
+                        TogglePlayPause("media-key");
+                    }
+                    e.Handled = true;
+                    break;
                 case Key.MediaNextTrack: PlayNext(); e.Handled = true; break;
                 case Key.MediaPreviousTrack: PlayPrev(); e.Handled = true; break;
                 case Key.VolumeMute: ToggleMute(); e.Handled = true; break;
@@ -3958,6 +4241,11 @@ namespace JonPlayer
                     e.Handled = true; break;
                 
                 case Key.F3: ToggleStatsOverlay(); e.Handled = true; break;
+
+                case Key.F4:
+                    ToggleHwAccel();
+                    e.Handled = true;
+                    break;
                 
                 case Key.Escape:
                     if (_isPipMode) { ExitPipMode(); e.Handled = true; break; }
@@ -4044,9 +4332,11 @@ namespace JonPlayer
             else
             {
                 OverlayStats.Visibility = Visibility.Visible;
-                if (_decoder != null && _decoder.IsPlaying) _statsTimer.Start();
+                if (_decoder != null && _decoder.IsRunning) _statsTimer.Start();
             }
         }
+
+        private DateTime _lastTimeUpdate = DateTime.MinValue;
 
         private void StatsTimer_Tick(object? sender, EventArgs e)
         {
@@ -4065,22 +4355,34 @@ namespace JonPlayer
             _lastCpuCheckTime = currentCheckTime;
 
             var process = Process.GetCurrentProcess();
+            // WorkingSet64: 프로세스 실제 물리 메모리 사용량 (Task Manager와 유사). 오디오 전용 시 불필요한 D3D renderer 해제로 더 정확해짐.
             double memoryMb = process.WorkingSet64 / 1024.0 / 1024.0;
             int totalThreads = process.Threads.Count;
 
-            double avgRender = 0;
-            if (_renderSamples > 0)
-            {
-                avgRender = _totalRenderTimeMs / _renderSamples;
-                _totalRenderTimeMs = 0;
-                _renderSamples = 0;
-            }
+            double avgRender = _renderer?.LastRenderTimeMs ?? 0.0;
 
             var stats = _decoder.GetStats();
             string state = _decoder.IsPlaying ? "Playing" : "Paused";
             if (!_decoder.IsRunning) state = "Stopped";
 
-            var sb = new StringBuilder();
+            bool decodeHw = stats.IsRealHwAccel || _decoder.LastDecodedFrameIsHardware;
+            bool renderHw = _renderer?.LastFrameIsHardware == true;
+            stats.RendererMode = (decodeHw && renderHw) ? "D3D11" : "BGRA";
+            if (!decodeHw)
+            {
+                stats.DecoderMode = stats.IsHwAccel ? "SW Fallback" : "Software";
+            }
+
+            string decodeMode = _forceSoftwareDecode ? "SW (CPU)" : "HW (D3D11VA)";
+            stats.GpuUploadTimeMs = _renderer?.LastGpuUploadTimeMs ?? 0.0;
+            if (_decoder.IsPlaying && _waveProvider != null && _waveProvider.BufferedDuration.TotalMilliseconds < 20.0)
+            {
+                _audioUnderrunCount++;
+            }
+            stats.AudioUnderrunCount = _audioUnderrunCount;
+            
+            var sbLeft = new StringBuilder();
+            var sbRight = new StringBuilder();
             
             bool hasVideo = _decoder.HasVideo && !string.Equals(stats.VideoInfo, "No Video", StringComparison.OrdinalIgnoreCase);
             var infoParts = stats.VideoInfo?.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -4094,89 +4396,121 @@ namespace JonPlayer
 
             if (_isPipMode)
             {
-                sb.AppendLine(hasVideo ? "Video" : "Audio");
-                sb.AppendLine($"Codec  {codec}");
+                sbLeft.AppendLine(hasVideo ? "Video" : "Audio");
+                sbLeft.AppendLine($"Codec  {codec}");
                 if (hasVideo)
                 {
-                    sb.AppendLine($"Size   {res}");
-                    sb.AppendLine($"FPS    {stats.ActualFps:F1}/{stats.TargetFps:F1}");
-                    sb.AppendLine($"Drop   {stats.DroppedFrames}");
-                    sb.AppendLine($"HW     {(stats.IsHwAccel ? "D3D11" : "CPU")}");
+                    sbLeft.AppendLine($"Size   {res}");
+                    sbLeft.AppendLine($"FPS    {stats.VideoDecodeFps:F1}/{stats.TargetFps:F1}");
+                    sbLeft.AppendLine($"Drop   {stats.DroppedFrames}");
+                    sbLeft.AppendLine($"Decode {decodeMode}");
                 }
                 else
                 {
-                    sb.AppendLine($"Audio  {stats.AudioInfo}");
+                    sbLeft.AppendLine($"Audio  {stats.AudioInfo}");
                 }
-                sb.AppendLine($"Queue  V{stats.PacketQueueSize} A{stats.AudioQueueSize}");
-                sb.AppendLine($"Drift  {stats.SyncDelayMs:F0} ms");
-                sb.AppendLine($"CPU    {cpuUsage:F1}%");
-                sb.Append($"State  {state}");
-                TxtOverlayStats.Text = sb.ToString();
+                sbLeft.AppendLine($"Decode {decodeMode}");
+                sbLeft.AppendLine($"Queue  V{stats.VideoPacketQueueSize} A{stats.AudioPacketQueueSize}");
+                if (hasVideo)
+                {
+                    sbLeft.AppendLine($"A/V    {stats.AvDiffMs:F0} ms");
+                }
+                sbLeft.AppendLine($"CPU    {cpuUsage:F1}%");
+                sbLeft.Append($"State  {state}");
+                TxtOverlayStatsLeft.Text = sbLeft.ToString();
+                TxtOverlayStatsRight.Text = "";
                 return;
             }
 
-            sb.AppendLine(hasVideo ? "Video" : "Audio");
-            sb.AppendLine("────────────────────");
-            
-            sb.AppendLine($"{"Codec".PadRight(12)}{codec}");
+            sbLeft.AppendLine(hasVideo ? "Video" : "Audio");
+            sbLeft.AppendLine("────────────────────");
+            sbLeft.AppendLine($"{"Codec".PadRight(12)}{codec}");
             if (hasVideo)
             {
-                sb.AppendLine($"{"Resolution".PadRight(12)}{res}");
-                sb.AppendLine($"{"DecodeFPS".PadRight(12)}{stats.ActualFps:F1} / {stats.TargetFps:F1}");
-                sb.AppendLine($"{"DisplayFPS".PadRight(12)}{_renderer?.PresentedFps ?? 0:F1}");
-                sb.AppendLine($"{"Render Events".PadRight(14)}{_renderer?.PresentedFps ?? 0}");
-                sb.AppendLine($"{"Dropped".PadRight(12)}{stats.DroppedFrames}");
-                sb.AppendLine($"{"RenderSkip".PadRight(12)}{_renderer?.SkippedFramesPerSecond ?? 0}");
+                if (_audioEnhancer != null)
+                {
+                    double gainDb = 20 * Math.Log10(Math.Max(0.0001, _audioEnhancer.BaselineVolumeMultiplier));
+                    sbLeft.AppendLine($"{"Audio Gain".PadRight(12)}{gainDb:+0.0;-0.0;0.0} dB");
+                }
+                sbLeft.AppendLine($"{"Resolution".PadRight(12)}{res}");
+                sbLeft.AppendLine($"{"Reader FPS".PadRight(12)}{stats.ReaderFps:F1}");
+                sbLeft.AppendLine($"{"V.DecodeFPS".PadRight(12)}{stats.VideoDecodeFps:F1} / {stats.TargetFps:F1}");
+                sbLeft.AppendLine($"{"A.DecodeFPS".PadRight(12)}{stats.AudioDecodeFps:F1}");
+                sbLeft.AppendLine($"{"DisplayFPS".PadRight(12)}{_renderer?.PresentedFps ?? 0:F1}");
+                sbLeft.AppendLine($"{"Dropped".PadRight(12)}{stats.DroppedFrames}");
+                sbLeft.AppendLine($"{"A.Underrun".PadRight(12)}{stats.AudioUnderrunCount}");
             }
             else
             {
-                sb.AppendLine($"{"Format".PadRight(12)}{stats.AudioInfo}");
+                sbLeft.AppendLine($"{"Format".PadRight(12)}{stats.AudioInfo}");
             }
-            sb.AppendLine($"{"Bitrate".PadRight(12)}{stats.Bitrate / 1000} kbps");
+            sbLeft.AppendLine($"{"Bitrate".PadRight(12)}{stats.Bitrate / 1000} kbps");
             if (hasVideo)
-                sb.AppendLine($"{"HW Accel".PadRight(12)}{(stats.IsHwAccel ? "Active (D3D11)" : "Inactive (CPU)")}");
-            sb.AppendLine();
+            {
+                sbLeft.AppendLine($"{"Dec Mode".PadRight(12)}{stats.DecoderMode}");
+                sbLeft.AppendLine($"{"Ren Mode".PadRight(12)}{stats.RendererMode}");
+                sbLeft.AppendLine($"{"Decode Pref".PadRight(12)}{decodeMode}");
+            }
+            sbLeft.AppendLine();
             
-            sb.AppendLine("Performance");
-            sb.AppendLine("────────────────────");
-            sb.AppendLine($"{"Decode".PadRight(12)}{stats.AvgDecodeTimeMs:F1} ms");
-            sb.AppendLine($"{"Render".PadRight(12)}{avgRender:F1} ms");
-            sb.AppendLine($"{"Total".PadRight(12)}{(stats.AvgDecodeTimeMs + avgRender):F1} ms");
-            sb.AppendLine();
-            
-            sb.AppendLine("Buffer");
-            sb.AppendLine("────────────────────");
-            sb.AppendLine($"{"PacketQ".PadRight(12)}{stats.PacketQueueSize}");
-            sb.AppendLine($"{"AudioQ".PadRight(12)}{stats.AudioQueueSize}");
-            sb.AppendLine();
-            
-            sb.AppendLine("Sync");
-            sb.AppendLine("────────────────────");
-            sb.AppendLine($"{"Video PTS".PadRight(12)}{stats.VideoPts:F0} ms");
-            sb.AppendLine($"{"Audio PTS".PadRight(12)}{stats.AudioPts:F0} ms");
-            sb.AppendLine($"{"Drift".PadRight(12)}{stats.SyncDelayMs:F0} ms");
-            sb.AppendLine($"{"LateFrames".PadRight(12)}{stats.LateFrames}");
-            sb.AppendLine();
-            
-            sb.AppendLine("System");
-            sb.AppendLine("────────────────────");
-            sb.AppendLine($"{"CPU".PadRight(12)}{cpuUsage:F1}%");
-            sb.AppendLine($"{"Memory".PadRight(12)}{memoryMb:F0} MB");
-            sb.AppendLine($"{"Threads".PadRight(12)}{totalThreads}");
+            sbLeft.AppendLine("System");
+            sbLeft.AppendLine("────────────────────");
+            sbLeft.AppendLine($"{"CPU".PadRight(12)}{cpuUsage:F1}%");
+            sbLeft.AppendLine($"{"Memory".PadRight(12)}{memoryMb:F0} MB");
+            sbLeft.AppendLine($"{"Threads".PadRight(12)}{totalThreads}");
+            sbLeft.AppendLine($"{"Decode".PadRight(12)}{decodeMode}");
             if (_audioEnhancer != null)
             {
                 double gainDb = 20 * Math.Log10(Math.Max(0.0001, _audioEnhancer.BaselineVolumeMultiplier));
-                sb.AppendLine($"{"Audio Gain".PadRight(12)}{gainDb:+0.0;-0.0;0.0} dB");
+                sbLeft.AppendLine($"{"Audio Gain".PadRight(12)}{gainDb:+0.0;-0.0;0.0} dB");
             }
-            sb.AppendLine();
-            
-            sb.AppendLine("Session");
-            sb.AppendLine("────────────────────");
-            sb.AppendLine($"{"State".PadRight(12)}{state}");
-            sb.AppendLine($"{"OpenCount".PadRight(12)}{_openCount}");
-            sb.Append($"{"SeekCount".PadRight(12)}{_seekCount}");
+            else
+            {
+                sbLeft.AppendLine($"{"Audio Gain".PadRight(12)}{0.0:+0.0;-0.0;0.0} dB");
+            }
+            sbLeft.AppendLine();
 
-            TxtOverlayStats.Text = sb.ToString();
+            sbLeft.AppendLine("Status Session");
+            sbLeft.AppendLine("────────────────────");
+            sbLeft.AppendLine($"{"State".PadRight(12)}{state}");
+            sbLeft.AppendLine($"{"OpenCount".PadRight(12)}{_openCount}");
+            sbLeft.AppendLine($"{"SeekCount".PadRight(12)}{_seekCount}");
+
+
+            sbRight.AppendLine("Performance");
+            sbRight.AppendLine("────────────────────");
+            sbRight.AppendLine($"{"V.Decode".PadRight(12)}{stats.VideoDecodeTimeMs:F1} ms");
+            sbRight.AppendLine($"{"A.Decode".PadRight(12)}{stats.AudioDecodeTimeMs:F1} ms");
+            if (!stats.IsRealHwAccel && stats.GpuUploadTimeMs > 0.0) sbRight.AppendLine($"{"GPU Upld".PadRight(12)}{stats.GpuUploadTimeMs:F1} ms");
+            if (!stats.IsRealHwAccel && stats.SwsConvertTimeMs > 0.0) sbRight.AppendLine($"{"SwsScale".PadRight(12)}{stats.SwsConvertTimeMs:F1} ms");
+            sbRight.AppendLine($"{"Render".PadRight(12)}{avgRender:F1} ms");
+            sbRight.AppendLine($"{"PoolWait".PadRight(12)}{stats.SurfacePoolWaitTimeMs:F1} ms");
+            sbRight.AppendLine($"{"Total".PadRight(12)}{(stats.AvgDecodeTimeMs + avgRender):F1} ms");
+            sbRight.AppendLine();
+
+            sbRight.AppendLine("Queue");
+            sbRight.AppendLine("────────────────────");
+            sbRight.AppendLine($"{"V.PacketQ".PadRight(12)}{stats.VideoPacketQueueSize}");
+            sbRight.AppendLine($"{"A.PacketQ".PadRight(12)}{stats.AudioPacketQueueSize}");
+            sbRight.AppendLine($"{"V.FrameQ".PadRight(12)}{stats.VideoFrameQueueSize}");
+            sbRight.AppendLine($"{"A.FrameQ".PadRight(12)}{stats.AudioFrameQueueSize}");
+            sbRight.AppendLine();
+
+            if (hasVideo)
+            {
+                sbRight.AppendLine("Sync");
+                sbRight.AppendLine("────────────────────");
+                sbRight.AppendLine($"{"V.Disp PTS".PadRight(12)}{stats.VideoPts:F0} ms");
+                sbRight.AppendLine($"{"V.Dec PTS".PadRight(12)}{stats.VideoDecodePts:F0} ms");
+                sbRight.AppendLine($"{"Audio PTS".PadRight(12)}{stats.AudioPts:F0} ms");
+                sbRight.AppendLine($"{"MasterClk".PadRight(12)}{stats.MasterClock:F0} ms");
+                sbRight.AppendLine($"{"A/V Diff".PadRight(12)}{stats.AvDiffMs:F0} ms");
+                sbRight.AppendLine($"{"DecodeLead".PadRight(12)}{stats.DecodeLeadMs:F0} ms");
+                sbRight.AppendLine($"{"LateFrames".PadRight(12)}{stats.LateFrames}");
+            }
+
+            TxtOverlayStatsLeft.Text = sbLeft.ToString();
+            TxtOverlayStatsRight.Text = sbRight.ToString();
         }
         private bool _isDraggingSubtitle = false;
         private System.Windows.Point _subtitleLastMousePos;
