@@ -9,7 +9,13 @@ namespace JonPlayer
         public InputWindow()
         {
             InitializeComponent();
+        }
+
+        private void Window_Loaded(object sender, RoutedEventArgs e)
+        {
+            // Proper focus after window is loaded (Focus() in ctor doesn't work reliably)
             TxtUrl.Focus();
+            TxtUrl.SelectAll(); // ready for paste / replace
         }
 
         private void BtnOpen_Click(object sender, RoutedEventArgs e)

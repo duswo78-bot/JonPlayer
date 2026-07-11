@@ -59,6 +59,14 @@ public class D3D11VideoRenderer : IDisposable
 
 	private ID3D11Texture2D? _d3d11DecodeTexture;
 
+	private ID3D11Texture2D? _swYTexture;
+
+	private ID3D11Texture2D? _swUvTexture;
+
+	private ID3D11ShaderResourceView? _swSrvY;
+
+	private ID3D11ShaderResourceView? _swSrvUv;
+
 	private ID3D11Texture2D? _bgraTexture;
 
 	private ID3D11ShaderResourceView? _bgraSrv;
@@ -103,6 +111,26 @@ public class D3D11VideoRenderer : IDisposable
 
 	public bool LastFrameIsHardware => _lastRenderedFrame?.IsD3D11 == true;
 
+	public string LastRendererMode
+	{
+		get
+		{
+			if (_lastRenderedFrame == null)
+			{
+				return "—";
+			}
+			if (_lastRenderedFrame.IsD3D11)
+			{
+				return "D3D11";
+			}
+			if (_lastRenderedFrame.BufferLayout == FFmpegMediaDecoder.SwVideoBufferLayout.Nv12)
+			{
+				return "YUV(GPU)";
+			}
+			return "BGRA";
+		}
+	}
+
 	public double LastRenderTimeMs { get; private set; }
 
 	public double LastGpuUploadTimeMs { get; private set; }
@@ -124,6 +152,8 @@ public class D3D11VideoRenderer : IDisposable
 		_hwnd = hwnd;
 		_decoder = decoder;
 		InitializeD3D();
+		// Wipe any previous swapchain content left on the HWND from the last video.
+		PresentBlack();
 	}
 
 	public void EnableEnhancedShader(bool enable)
@@ -139,18 +169,123 @@ public class D3D11VideoRenderer : IDisposable
 		_lastFpsUpdateTime = DateTime.UtcNow;
 	}
 
+	public void ClearDisplay() => PresentBlack();
+
+	public void PrepareForSeek() => PresentBlack();
+
+	/// <summary>
+	/// Stop the render thread from pulling frames. Must run before decoder.Stop/Dispose
+	/// so SW NV12 pool / D3D11VA textures are not freed while still mapped.
+	/// </summary>
+	public void DetachDecoder()
+	{
+		_decoder = null;
+	}
+
+	/// <summary>
+	/// Safe teardown step while the decoder is still alive: drop held frames and GPU upload
+	/// textures, paint black. Call only after DetachDecoder and before decoder Dispose.
+	/// </summary>
+	public void PrepareForDecoderTeardown()
+	{
+		lock (_renderLock)
+		{
+			DisposeFrameResourcesUnlocked();
+			PresentBlackUnlocked();
+		}
+	}
+
+	/// <summary>
+	/// Drop held frame refs and GPU upload textures so the next file cannot show a residual image.
+	/// Do not call while the render thread may still be mapping those textures without Detach first.
+	/// </summary>
+	public void ResetFrameResources()
+	{
+		lock (_renderLock)
+		{
+			DisposeFrameResourcesUnlocked();
+			PresentBlackUnlocked();
+		}
+	}
+
+	private void DisposeFrameResourcesUnlocked()
+	{
+		_lastRenderedFrame?.Dispose();
+		_lastRenderedFrame = null;
+		_d3d11DecodeTexture?.Dispose();
+		_d3d11DecodeTexture = null;
+		_srvY?.Dispose();
+		_srvY = null;
+		_srvUV?.Dispose();
+		_srvUV = null;
+		_swYTexture?.Dispose();
+		_swYTexture = null;
+		_swUvTexture?.Dispose();
+		_swUvTexture = null;
+		_swSrvY?.Dispose();
+		_swSrvY = null;
+		_swSrvUv?.Dispose();
+		_swSrvUv = null;
+		_bgraTexture?.Dispose();
+		_bgraTexture = null;
+		_bgraSrv?.Dispose();
+		_bgraSrv = null;
+	}
+
+	private void PresentBlack()
+	{
+		if (_isDisposed)
+		{
+			return;
+		}
+		lock (_renderLock)
+		{
+			PresentBlackUnlocked();
+		}
+	}
+
+	private void PresentBlackUnlocked()
+	{
+		_lastRenderedFrame?.Dispose();
+		_lastRenderedFrame = null;
+		if (_isDisposed || _d3d11Context == null || _swapChain == null)
+		{
+			return;
+		}
+		try
+		{
+			// Ensure RTV exists (constructor path may not have resized yet).
+			if (_renderTargetView == null)
+			{
+				ResetSize();
+			}
+			if (_renderTargetView != null && !_isDisposed)
+			{
+				_d3d11Context.ClearRenderTargetView(_renderTargetView, new Color4(0f, 0f, 0f, 1f));
+				_swapChain.Present(0u, PresentFlags.None);
+			}
+		}
+		catch (Exception)
+		{
+		}
+	}
+
 	private void WaitForPresentationSlot()
 	{
-		double targetFps = _decoder?.TargetFps ?? 0.0;
-		if (targetFps < 24.0 || targetFps > 240.0)
+		if (_isDisposed || _decoder == null)
 		{
-			targetFps = 60.0;
+			return;
+		}
+		double targetFps = _decoder?.TargetFps ?? 0.0;
+		if (targetFps < 23.0 || targetFps > 240.0)
+		{
+			targetFps = 24000.0 / 1001.0;
 		}
 		double minIntervalMs = 1000.0 / targetFps;
 		DateTime deadline = (_lastPresentUtc == DateTime.MinValue)
 			? DateTime.UtcNow
 			: _lastPresentUtc.AddMilliseconds(minIntervalMs);
-		while (DateTime.UtcNow < deadline)
+		while (!_isDisposed && _decoder != null && DateTime.UtcNow < deadline)
 		{
 			double remainingMs = (deadline - DateTime.UtcNow).TotalMilliseconds;
 			if (remainingMs <= 0.5)
@@ -340,54 +475,107 @@ public class D3D11VideoRenderer : IDisposable
 		{
 			while (!_isDisposed)
 			{
-				if (_decoder == null || !_decoder.IsRunning || _decoder.IsPaused)
+				// Snapshot — DetachDecoder may null this from the UI thread mid-loop.
+				FFmpegMediaDecoder? decoder = _decoder;
+				if (decoder == null || !decoder.IsRunning)
 				{
-					if (_decoder == null)
+					// Idle: keep black without thrashing Present every ms.
+					if (_lastRenderedFrame != null)
 					{
-						lock (_renderLock)
-						{
-							ResetSize();
-							if (_renderTargetView != null && _d3d11Context != null)
-							{
-								try
-								{
-									_d3d11Context.ClearRenderTargetView(_renderTargetView, new Color4(0f, 0f, 0f));
-									_swapChain?.Present(1u, PresentFlags.None);
-								}
-								catch (Exception)
-								{
-								}
-							}
-						}
+						PresentBlack();
 					}
 					Thread.Sleep(16);
 					continue;
 				}
-				double masterClockPts = _decoder.GetMasterClockPts();
-				FFmpegMediaDecoder.DecodedVideoFrame decodedVideoFrame = _decoder.PullVideoFrame(masterClockPts);
-				if (decodedVideoFrame != null)
+				try
 				{
-					WaitForPresentationSlot();
-					try
+					if (decoder.IsPaused)
 					{
-						RenderFrameInternal(decodedVideoFrame);
-						// Pacing is handled by WaitForPresentationSlot; avoid DXGI vsync capping 60p on 50Hz displays.
-						_swapChain?.Present(0u, PresentFlags.None);
-						_lastPresentUtc = DateTime.UtcNow;
-						_presentedFramesThisSecond++;
-						_lastRenderedFrame?.Dispose();
-						_lastRenderedFrame = decodedVideoFrame;
+						// Seek-while-paused: still present the post-seek land frame (no pacing).
+						FFmpegMediaDecoder.DecodedVideoFrame? pausedSeekFrame = decoder.TryPullPostSeekDisplayFrame();
+						if (pausedSeekFrame != null)
+						{
+							try
+							{
+								if (_isDisposed || _decoder == null)
+								{
+									pausedSeekFrame.Dispose();
+								}
+								else
+								{
+									RenderFrameInternal(pausedSeekFrame);
+									_swapChain?.Present(0u, PresentFlags.None);
+									_lastPresentUtc = DateTime.UtcNow;
+									_lastRenderedFrame?.Dispose();
+									_lastRenderedFrame = pausedSeekFrame;
+								}
+							}
+							catch (Exception)
+							{
+								pausedSeekFrame.Dispose();
+							}
+						}
+						Thread.Sleep(16);
+						continue;
 					}
-					catch (Exception)
+					double masterClockPts = decoder.GetMasterClockPts();
+					// Bail if detached during clock read (teardown).
+					if (_isDisposed || !ReferenceEquals(_decoder, decoder))
 					{
-						decodedVideoFrame.Dispose();
+						Thread.Sleep(1);
+						continue;
 					}
+					FFmpegMediaDecoder.DecodedVideoFrame? decodedVideoFrame = decoder.PullVideoFrame(masterClockPts);
+					if (decodedVideoFrame != null)
+					{
+						WaitForPresentationSlot();
+						// After wait: teardown may have detached — never touch freed SW/HW buffers.
+						if (_isDisposed || !ReferenceEquals(_decoder, decoder))
+						{
+							decodedVideoFrame.Dispose();
+							continue;
+						}
+						try
+						{
+							RenderFrameInternal(decodedVideoFrame);
+							if (!_isDisposed)
+							{
+								_swapChain?.Present(0u, PresentFlags.None);
+								_lastPresentUtc = DateTime.UtcNow;
+								_presentedFramesThisSecond++;
+								_lastRenderedFrame?.Dispose();
+								_lastRenderedFrame = decodedVideoFrame;
+							}
+							else
+							{
+								decodedVideoFrame.Dispose();
+							}
+						}
+						catch (Exception)
+						{
+							decodedVideoFrame.Dispose();
+						}
+					}
+					else
+					{
+						// No frame yet (startup / decode lag): black until first real frame.
+						if (_lastRenderedFrame == null)
+						{
+							PresentBlack();
+						}
+						Thread.Sleep(1);
+					}
+					UpdatePresentationStats();
 				}
-				else
+				catch (ObjectDisposedException)
 				{
-					Thread.Sleep(1);
+					Thread.Sleep(8);
 				}
-				UpdatePresentationStats();
+				catch (Exception)
+				{
+					// Never touch decoder/native buffers after detach failures.
+					Thread.Sleep(8);
+				}
 			}
 		}
 		catch (Exception)
@@ -425,7 +613,14 @@ public class D3D11VideoRenderer : IDisposable
 					LastGpuUploadTimeMs = 0.0;
 					RenderHardwareTexture(frame.TexturePtr, frame.SliceIndexOrStride, frame.Width, frame.Height);
 				}
-				else if (frame.BgraBuffer != null && frame.BgraPointer != IntPtr.Zero)
+				else if (frame.BufferLayout == FFmpegMediaDecoder.SwVideoBufferLayout.Nv12 && frame.Nv12Pointer != IntPtr.Zero)
+				{
+					Stopwatch uploadTimer = Stopwatch.StartNew();
+					RenderSoftwareNv12(frame.Nv12Pointer, frame.Width, frame.Height);
+					uploadTimer.Stop();
+					LastGpuUploadTimeMs = uploadTimer.Elapsed.TotalMilliseconds;
+				}
+				else if (frame.BgraPointer != IntPtr.Zero)
 				{
 					Stopwatch uploadTimer = Stopwatch.StartNew();
 					RenderSoftwareBuffer(frame.BgraPointer, frame.SliceIndexOrStride, frame.Width, frame.Height);
@@ -436,6 +631,129 @@ public class D3D11VideoRenderer : IDisposable
 		}
 		renderTimer.Stop();
 		LastRenderTimeMs = renderTimer.Elapsed.TotalMilliseconds;
+	}
+
+	private unsafe void RenderSoftwareNv12(IntPtr nv12Data, int width, int height)
+	{
+		int chromaHeight = height / 2;
+		int chromaWidth = width / 2;
+		if (_swYTexture == null
+			|| _swUvTexture == null
+			|| _swYTexture.Description.Width != (uint)width
+			|| _swYTexture.Description.Height != (uint)height
+			|| _swUvTexture.Description.Width != (uint)chromaWidth
+			|| _swUvTexture.Description.Height != (uint)chromaHeight)
+		{
+			_swSrvY?.Dispose();
+			_swSrvUv?.Dispose();
+			_swYTexture?.Dispose();
+			_swUvTexture?.Dispose();
+			_swYTexture = _d3d11Device!.CreateTexture2D(new Texture2DDescription
+			{
+				Width = (uint)width,
+				Height = (uint)height,
+				MipLevels = 1u,
+				ArraySize = 1u,
+				Format = Format.R8_UNorm,
+				Usage = ResourceUsage.Dynamic,
+				BindFlags = BindFlags.ShaderResource,
+				CPUAccessFlags = CpuAccessFlags.Write,
+				SampleDescription = new SampleDescription(1u, 0u)
+			});
+			// NV12 UV: width/2 R8G8 texels per row (each texel = one U+V pair), height/2 rows.
+			_swUvTexture = _d3d11Device.CreateTexture2D(new Texture2DDescription
+			{
+				Width = (uint)chromaWidth,
+				Height = (uint)chromaHeight,
+				MipLevels = 1u,
+				ArraySize = 1u,
+				Format = Format.R8G8_UNorm,
+				Usage = ResourceUsage.Dynamic,
+				BindFlags = BindFlags.ShaderResource,
+				CPUAccessFlags = CpuAccessFlags.Write,
+				SampleDescription = new SampleDescription(1u, 0u)
+			});
+			_swSrvY = _d3d11Device.CreateShaderResourceView(_swYTexture);
+			_swSrvUv = _d3d11Device.CreateShaderResourceView(_swUvTexture);
+		}
+		byte* src = (byte*)nv12Data;
+		byte* srcUv = src + (nuint)(width * height);
+		MappedSubresource mappedY = _d3d11Context!.Map(_swYTexture, 0u, MapMode.WriteDiscard);
+		if (mappedY.DataPointer != IntPtr.Zero)
+		{
+			int rowPitch = (int)mappedY.RowPitch;
+			byte* dstY = (byte*)mappedY.DataPointer;
+			for (int row = 0; row < height; row++)
+			{
+				Buffer.MemoryCopy(src + (nuint)(row * width), dstY + (nuint)(row * rowPitch), width, width);
+			}
+			_d3d11Context.Unmap(_swYTexture, 0u);
+		}
+		MappedSubresource mappedUv = _d3d11Context.Map(_swUvTexture, 0u, MapMode.WriteDiscard);
+		if (mappedUv.DataPointer != IntPtr.Zero)
+		{
+			int rowPitch = (int)mappedUv.RowPitch;
+			byte* dstUv = (byte*)mappedUv.DataPointer;
+			int uvRowBytes = chromaWidth * 2;
+			for (int row = 0; row < chromaHeight; row++)
+			{
+				Buffer.MemoryCopy(srcUv + (nuint)(row * width), dstUv + (nuint)(row * rowPitch), uvRowBytes, uvRowBytes);
+			}
+			_d3d11Context.Unmap(_swUvTexture, 0u);
+		}
+		DrawYuvShaderResources(width, height, _swSrvY!, _swSrvUv!, useEnhancedShaderPath: true);
+	}
+
+	private void DrawYuvShaderResources(int frameWidth, int frameHeight, ID3D11ShaderResourceView srvY, ID3D11ShaderResourceView srvUv, bool useEnhancedShaderPath)
+	{
+		_d3d11Context!.ClearRenderTargetView(_renderTargetView!, new Color4(0f, 0f, 0f));
+		float num = (float)frameWidth / (float)frameHeight;
+		float num2 = (float)_width / (float)_height;
+		int num3 = 0;
+		int num4 = 0;
+		int num5 = _width;
+		int num6 = _height;
+		if (StretchMode == Stretch.Uniform)
+		{
+			if (num2 > num)
+			{
+				num5 = (int)((float)_height * num);
+				num3 = (_width - num5) / 2;
+			}
+			else
+			{
+				num6 = (int)((float)_width / num);
+				num4 = (_height - num6) / 2;
+			}
+		}
+		else if (StretchMode == Stretch.UniformToFill)
+		{
+			if (num2 > num)
+			{
+				num6 = (int)((float)_width / num);
+				num4 = (_height - num6) / 2;
+			}
+			else
+			{
+				num5 = (int)((float)_height * num);
+				num3 = (_width - num5) / 2;
+			}
+		}
+		_d3d11Context.OMSetRenderTargets(_renderTargetView);
+		_d3d11Context.RSSetViewport(new Viewport(num3, num4, num5, num6));
+		_d3d11Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+		_d3d11Context.VSSetShader(_vertexShader);
+		ID3D11PixelShader pixelShader = _pixelShader!;
+		if (useEnhancedShaderPath && _useEnhancedShader)
+		{
+			pixelShader = (frameWidth < 3800)
+				? (_enhancedPixelShader ?? _pixelShader!)
+				: (_4kEnhancedPixelShader ?? _enhancedPixelShader ?? _pixelShader!);
+		}
+		_d3d11Context.PSSetShader(pixelShader);
+		_d3d11Context.PSSetSampler(0u, _samplerState);
+		_d3d11Context.PSSetShaderResources(0u, new ID3D11ShaderResourceView[2] { srvY, srvUv });
+		_d3d11Context.Draw(3u, 0u);
 	}
 
 	private unsafe void RenderSoftwareBuffer(IntPtr data, int stride, int width, int height)
@@ -463,9 +781,25 @@ public class D3D11VideoRenderer : IDisposable
 		MappedSubresource mappedSubresource = _d3d11Context.Map(_bgraTexture, 0u, MapMode.WriteDiscard);
 		if (mappedSubresource.DataPointer != IntPtr.Zero)
 		{
-			for (int i = 0; i < height; i++)
+			int rowPitch = (int)mappedSubresource.RowPitch;
+			int copyBytesPerRow = Math.Min(rowPitch, stride);
+			long totalCopy = (long)copyBytesPerRow * height;
+
+			if (stride == rowPitch || height <= 1)
 			{
-				Buffer.MemoryCopy((void*)IntPtr.Add(data, i * stride), (void*)IntPtr.Add(mappedSubresource.DataPointer, (int)(i * mappedSubresource.RowPitch)), (int)Math.Min(mappedSubresource.RowPitch, stride), (int)Math.Min(mappedSubresource.RowPitch, stride));
+				// Fast path: single contiguous copy (common when pitches match)
+				Buffer.MemoryCopy((void*)data, (void*)mappedSubresource.DataPointer, totalCopy, totalCopy);
+			}
+			else
+			{
+				for (int i = 0; i < height; i++)
+				{
+					Buffer.MemoryCopy(
+						(void*)IntPtr.Add(data, i * stride),
+						(void*)IntPtr.Add(mappedSubresource.DataPointer, i * rowPitch),
+						copyBytesPerRow,
+						copyBytesPerRow);
+				}
 			}
 			_d3d11Context.Unmap(_bgraTexture, 0u);
 		}
@@ -524,7 +858,12 @@ public class D3D11VideoRenderer : IDisposable
 			Marshal.AddRef(texturePtr);
 			using ID3D11Texture2D iD3D11Texture2D = new ID3D11Texture2D(texturePtr);
 			Texture2DDescription description = iD3D11Texture2D.Description;
-			if (_d3d11DecodeTexture == null || _d3d11DecodeTexture.Description.Width != trueWidth || _d3d11DecodeTexture.Description.Height != trueHeight)
+			bool needsHwDecodeTarget = _d3d11DecodeTexture == null
+				|| _d3d11DecodeTexture.Description.Width != (uint)trueWidth
+				|| _d3d11DecodeTexture.Description.Height != (uint)trueHeight
+				|| _d3d11DecodeTexture.Description.Format != description.Format
+				|| _d3d11DecodeTexture.Description.Usage != ResourceUsage.Default;
+			if (needsHwDecodeTarget)
 			{
 				_d3d11DecodeTexture?.Dispose();
 				_srvY?.Dispose();
@@ -621,8 +960,10 @@ public class D3D11VideoRenderer : IDisposable
 			_d3d11Context.PSSetShaderResources(0u, new ID3D11ShaderResourceView[2] { _srvY, _srvUV });
 			_d3d11Context.Draw(3u, 0u);
 		}
-		catch (Exception)
+		catch (Exception ex)
 		{
+			// Device mismatch or disposed texture — previously silent black frames.
+			System.Diagnostics.Debug.WriteLine($"[RenderHardwareTexture] {ex.GetType().Name}: {ex.Message}");
 		}
 	}
 
@@ -632,9 +973,13 @@ public class D3D11VideoRenderer : IDisposable
 		{
 			_renderTargetView?.Dispose();
 			_d3d11DecodeTexture?.Dispose();
+			_swYTexture?.Dispose();
+			_swUvTexture?.Dispose();
 			_bgraTexture?.Dispose();
 			_srvY?.Dispose();
 			_srvUV?.Dispose();
+			_swSrvY?.Dispose();
+			_swSrvUv?.Dispose();
 			_bgraSrv?.Dispose();
 			_swapChain?.Dispose();
 			_renderTargetView = null;
@@ -653,11 +998,13 @@ public class D3D11VideoRenderer : IDisposable
 		{
 			return;
 		}
+		// Stop pulling frames first, then signal loop exit and join before freeing D3D objects.
+		_decoder = null;
 		_isDisposed = true;
-		_renderThread?.Join();
-		CleanupResources();
+		_renderThread?.Join(5000);
 		lock (_renderLock)
 		{
+			DisposeFrameResourcesUnlocked();
 			_vertexShader?.Dispose();
 			_pixelShader?.Dispose();
 			_enhancedPixelShader?.Dispose();
@@ -666,9 +1013,30 @@ public class D3D11VideoRenderer : IDisposable
 			_enhancedRgbPixelShader?.Dispose();
 			_4kEnhancedRgbPixelShader?.Dispose();
 			_samplerState?.Dispose();
+			_renderTargetView?.Dispose();
+			_d3d11DecodeTexture?.Dispose();
+			_swYTexture?.Dispose();
+			_swUvTexture?.Dispose();
+			_bgraTexture?.Dispose();
+			_srvY?.Dispose();
+			_srvUV?.Dispose();
+			_swSrvY?.Dispose();
+			_swSrvUv?.Dispose();
+			_bgraSrv?.Dispose();
+			_swapChain?.Dispose();
+			_renderTargetView = null;
+			_d3d11DecodeTexture = null;
+			_bgraTexture = null;
+			_srvY = null;
+			_srvUV = null;
+			_bgraSrv = null;
+			_swapChain = null;
 			_d3d11Context?.Dispose();
 			_d3d11Device?.Dispose();
+			_d3d11Context = null;
+			_d3d11Device = null;
 			_lastRenderedFrame?.Dispose();
+			_lastRenderedFrame = null;
 		}
 	}
 }

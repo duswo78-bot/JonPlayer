@@ -17,6 +17,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media.Imaging;
 using NAudio.Wave;
 using System.Diagnostics;
+using System.Timers;
 using System.Windows.Media.Animation;
 
 // ── Resolve WPF vs WinForms ambiguities ──────────────────
@@ -174,6 +175,17 @@ namespace JonPlayer
         private bool _allowTimelineBackward;
         private bool _suppressTimelineSeek;
         private double _pendingSeekSubtitleMs = -1.0;
+
+        // === SEEK UX PROTECTION ZONE ===
+        // Core contract (do not accidentally break when touching PlayFile, timelines, or renderer):
+        // - User clicks a point on the bar -> bar + UI clock move there *immediately*.
+        // - We tell decoder to seek.
+        // - On actual land, we only snap the bar *forward* or on huge errors.
+        //   This prevents the bar from jumping back to the keyframe time (common video behavior).
+        // Related decoder protections: _activeSeekGen cancel, small-seek queue preserve, reduced post-seek prebuffer.
+        // If you change resets or open/seek paths, make sure _lastUserSeekTargetMs and related flags are cleared.
+        private double _lastUserSeekTargetMs = -1.0;
+
         private int _streamingSeekGeneration;
         private int _openGeneration;
         private bool _isClosing;
@@ -182,7 +194,16 @@ namespace JonPlayer
         private double _initialHeight;
         private long _lastAudioTicks;
 
+        private const int AutoVolumeCenter = 50;
+        private const int AutoVolumeMaxOffset = 15;
+        private const double AutoVolumeMaxGainDb = 20.0;
+        private const double AutoVolumeTargetMeanDb = -16.0;
+        private const double AutoVolumePeakLimitDb = -0.3;
+
         private int   _lastVolume    = 80;
+        private int   _userPreferredVolume = AutoVolumeCenter;
+        private double _lastAutoGainDb = 0.0;
+        private double _lastDetectedMeanDb = double.NaN;
         private bool  _isMuted;
         private bool  _isLightTheme = false;
         private double _currentSpeed  = 1.0f;
@@ -197,6 +218,19 @@ namespace JonPlayer
         private DispatcherTimer _statsTimer;
         private DispatcherTimer _subtitleTimer;
         private DispatcherTimer _toastTimer;
+        private DispatcherTimer _timelineTimer;
+
+        // UI-only wall-clock for smooth independent progress bar + time display
+        private Stopwatch _uiClock = new Stopwatch();
+        private double _uiClockBaseMs = 0.0;
+        private double _uiClockSpeed = 1.0;
+
+        // More reliable update driver for continuous wall-time progress (avoids DispatcherTimer starvation)
+        private bool _timelineRenderingHooked;
+
+        // Threadpool-based timer for reliable timeline updates especially on audio-only (static UI)
+        // where WPF CompositionTarget and DispatcherTimer can be throttled.
+        private System.Timers.Timer? _preciseTimelineTimer;
 
         // Stats Overlay
         private int _openCount = 0;
@@ -210,6 +244,8 @@ namespace JonPlayer
         private bool _isMouseOverFsStrip;
         private bool _isMouseOverFsExitBadge;
         private Point _lastPolledMousePos = new Point(double.NaN, double.NaN);
+        private const double FsBottomHotZonePx = 130;
+        private const double FsTopHotZonePx = 80;
 
         private static bool IsStreamingPath(string? path)
         {
@@ -400,7 +436,12 @@ namespace JonPlayer
 
             this.StateChanged += Window_StateChanged;
             this.MouseMove += Window_MouseMove;
-                        this.LocationChanged += (s, e) => SyncOverlayWindowToMainWindow();
+                        this.LocationChanged += (s, e) =>
+            {
+                SyncOverlayWindowToMainWindow();
+                // Monitor may change when the window is dragged — refresh which size presets fit.
+                UpdateWindowSizePresetUi();
+            };
             this.SizeChanged += (s, e) => SyncOverlayWindowToMainWindow();
             
             // Hook global thread messages to reliably capture shortcuts even if focus is lost or HwndHost steals it
@@ -416,6 +457,9 @@ namespace JonPlayer
             _subtitleTimer.Tick += SubtitleTimer_Tick;
             _subtitleTimer.Start();
 
+            _timelineTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(20) };
+            _timelineTimer.Tick += TimelineTimer_Tick;
+
             _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _toastTimer.Tick += (s, e) => { ToastOverlay.Visibility = Visibility.Collapsed; _toastTimer.Stop(); };
 
@@ -429,8 +473,7 @@ namespace JonPlayer
                     if (_videoHwndHost != null) _videoHwndHost.HideCursor = true;
                     if (_isFullscreen)
                     {
-                        FsBottomStrip.Visibility = Visibility.Collapsed;
-                        HideFsExitBadge();
+                        UpdateFsChromeVisibility(forceHideChrome: true);
                     }
                 }
                 _cursorHideTimer.Stop();
@@ -471,7 +514,11 @@ namespace JonPlayer
                 Interlocked.Increment(ref _openGeneration);
                 Interlocked.Increment(ref _streamingSeekGeneration);
                 _isOpeningFile = false;
+                Volatile.Write(ref _openingOwnedByGen, 0);
                 _isSeeking = false;
+                _currentPlaybackOpenGen = 0;
+                _activePlaybackFinishedHandler = null;
+                _pendingPlaylistTarget = null;
 
                 // Stop all timers first to prevent null reference after disposal
                 _fsMousePollTimer.Stop();
@@ -481,6 +528,15 @@ namespace JonPlayer
                 _fsVolumeTimer.Stop();
                 _notesTimer.Stop();
                 _playlistTimer?.Stop();
+                _timelineTimer.Stop();
+                _preciseTimelineTimer?.Stop();
+                _preciseTimelineTimer?.Dispose();
+                _preciseTimelineTimer = null;
+                if (_timelineRenderingHooked)
+                {
+                    CompositionTarget.Rendering -= TimelineRendering;
+                    _timelineRenderingHooked = false;
+                }
 
                 CancelWhisperExtraction();
                 StopStreamingLoadingBlink();
@@ -509,6 +565,10 @@ namespace JonPlayer
 
             // Overlay PreviewKeyDown handles keys when the UI layer has focus.
             if (_overlayWindow != null && _overlayWindow.IsActive) return;
+
+            // Do not steal keys when a TextBox/ComboBox has focus anywhere (e.g. URL input dialog for Ctrl+V paste)
+            var focused = System.Windows.Input.Keyboard.FocusedElement;
+            if (focused is WpfTextBox || focused is WpfComboBox) return;
 
             int vk = msg.wParam.ToInt32();
             Key key = KeyInterop.KeyFromVirtualKey(vk);
@@ -648,36 +708,44 @@ namespace JonPlayer
 
         private void Decoder_PositionChanged(double ratio)
         {
-            // Timeline is driven by UpdateTimelineFromPlayback() via master clock.
+            // Timeline UI is driven by independent wall-clock (GetUiClockMs).
+            // Decoder master clock is still used for A/V sync, subtitles, and frame scheduling.
         }
 
         private void UpdateTimelineFromPlayback()
         {
-            if (_isUserDraggingSlider || _isSeeking || _decoder == null || !_decoder.IsRunning) return;
+            if (_isUserDraggingSlider || _isOpeningFile || _decoder == null || !_decoder.IsRunning) return;
+            if (_isSeeking && (_decoder.HasVideo || !_decoder.IsSeekActive)) return;
 
             double durationMs = _decoder.DurationSeconds * 1000.0;
             if (durationMs <= 0 || SliderTimeline == null) return;
 
-            double masterClockMs = _decoder.GetCurrentTimeMs();
-            double newSliderValue = masterClockMs / durationMs * SliderTimeline.Maximum;
+            double uiMs = GetUiClockMs();
+            double newSliderValue = uiMs / durationMs * SliderTimeline.Maximum;
 
-            // Block small backward jumps from audio-sync correction or out-of-order video PTS events.
-            if (!_allowTimelineBackward && newSliderValue + 1.0 < SliderTimeline.Value)
+            // Only block clearly backward movement (wall clock should never go back).
+            // The old guard was to protect against PTS jitter; with dedicated wall clock we relax it.
+            if (!_allowTimelineBackward && newSliderValue + 0.5 < SliderTimeline.Value)
             {
+                // Still allow forward jumps (e.g. after long timer delay or seek land)
                 return;
             }
             _allowTimelineBackward = false;
 
+            // Only update if there's a visible change to reduce binding/layout churn on Slider + fill converter.
             _isUpdatingFromPlayer = true;
-            SliderTimeline.Value = newSliderValue;
-            if (SliderTimelineFS != null) SliderTimelineFS.Value = newSliderValue;
+            if (Math.Abs(SliderTimeline.Value - newSliderValue) > 0.05)
+            {
+                SliderTimeline.Value = newSliderValue;
+                if (SliderTimelineFS != null) SliderTimelineFS.Value = newSliderValue;
+            }
             _isUpdatingFromPlayer = false;
 
             var now = DateTime.UtcNow;
             if ((now - _lastTimeUpdate).TotalMilliseconds >= 250)
             {
                 _lastTimeUpdate = now;
-                TimeSpan current = TimeSpan.FromMilliseconds(masterClockMs);
+                TimeSpan current = TimeSpan.FromMilliseconds(Math.Max(0, uiMs));
                 TimeSpan total = TimeSpan.FromMilliseconds(durationMs);
                 if (TxtCurrentTime != null) TxtCurrentTime.Text = current.ToString(@"hh\:mm\:ss");
                 if (TxtTotalTime != null) TxtTotalTime.Text = total.ToString(@"hh\:mm\:ss");
@@ -686,18 +754,120 @@ namespace JonPlayer
             }
         }
 
+        private void TimelineTimer_Tick(object? sender, EventArgs e)
+        {
+            UpdateTimelineFromPlayback();
+        }
+
+        private void TimelineRendering(object? sender, EventArgs e)
+        {
+            // Primary driver: CompositionTarget.Rendering fires on every render frame.
+            // This is far more reliable than DispatcherTimer for continuous wall-time progress
+            // when the UI thread or dispatcher is under load from video decoding/rendering.
+            UpdateTimelineFromPlayback();
+        }
+
+        // --- Independent UI clock for progress bar + displayed time (wall time driven) ---
+        private double GetUiClockMs()
+        {
+            if (_uiClock.IsRunning)
+                return _uiClockBaseMs + _uiClock.Elapsed.TotalMilliseconds * _uiClockSpeed;
+            return _uiClockBaseMs;
+        }
+
+        private void StartUiClock(double baseMs)
+        {
+            _uiClockBaseMs = Math.Max(0, baseMs);
+            _uiClockSpeed = _currentSpeed;
+            _uiClock.Restart();
+
+            // Use a threadpool System.Timers.Timer + BeginInvoke for reliable steady updates.
+            // Critical for audio-only (MP3 etc.): WPF CompositionTarget fires infrequently on static UIs
+            // (album art), and even DispatcherTimer can get delayed. The wall time (Stopwatch) is correct;
+            // the problem was delivery of the value to Slider/Text.
+            EnsurePreciseTimelineTimer();
+
+            // Keep CompositionTarget as bonus when video is actively rendering (keeps composition hot)
+            if (_decoder != null && _decoder.HasVideo && !_timelineRenderingHooked)
+            {
+                CompositionTarget.Rendering += TimelineRendering;
+                _timelineRenderingHooked = true;
+            }
+
+            if (!_timelineTimer.IsEnabled)
+                _timelineTimer.Start(); // fallback
+        }
+
+        private void PauseUiClock()
+        {
+            if (_uiClock.IsRunning)
+            {
+                _uiClockBaseMs = GetUiClockMs();
+                _uiClock.Reset();
+            }
+            if (_timelineRenderingHooked)
+            {
+                CompositionTarget.Rendering -= TimelineRendering;
+                _timelineRenderingHooked = false;
+            }
+            _timelineTimer.Stop();
+            _preciseTimelineTimer?.Stop();
+        }
+
+        private void SyncUiClock(double mediaMs)
+        {
+            _uiClockBaseMs = Math.Max(0, mediaMs);
+            _uiClock.Restart();
+            if (_userWantsPlayback && _decoder != null && _decoder.IsRunning && !_decoder.IsPaused)
+            {
+                EnsurePreciseTimelineTimer();
+                if (_decoder.HasVideo && !_timelineRenderingHooked)
+                {
+                    CompositionTarget.Rendering += TimelineRendering;
+                    _timelineRenderingHooked = true;
+                }
+                if (!_timelineTimer.IsEnabled)
+                    _timelineTimer.Start();
+            }
+        }
+
+        private void EnsurePreciseTimelineTimer()
+        {
+            if (_preciseTimelineTimer == null)
+            {
+                _preciseTimelineTimer = new System.Timers.Timer(16); // ~60 Hz
+                _preciseTimelineTimer.Elapsed += (s, e) =>
+                {
+                    // Post to UI thread at render priority. This runs from threadpool, independent of render activity.
+                    Dispatcher.BeginInvoke(new Action(UpdateTimelineFromPlayback), DispatcherPriority.Render);
+                };
+                _preciseTimelineTimer.AutoReset = true;
+            }
+            if (!_preciseTimelineTimer.Enabled)
+                _preciseTimelineTimer.Start();
+        }
+
+        private void SetUiClockSpeed(double newSpeed)
+        {
+            double current = GetUiClockMs();
+            _uiClockBaseMs = Math.Max(0, current);
+            _uiClock.Restart();
+            _uiClockSpeed = newSpeed;
+        }
+
         private void SubtitleTimer_Tick(object? sender, EventArgs e)
         {
             if (_decoder == null || !_decoder.IsRunning) return;
 
             if (_decoder.IsPaused) return;
 
-            UpdateTimelineFromPlayback();
+            UpdateTimelineFromPlayback();   // uses independent UI wall clock for smooth bar/time
 
-            double masterClockMs = _isSeeking && _pendingSeekSubtitleMs >= 0.0
+            // Subtitles and precise timing still use decoder's media clock (for A/V accuracy)
+            double mediaClockMs = (_isUserDraggingSlider || _isSeeking) && _pendingSeekSubtitleMs >= 0.0
                 ? _pendingSeekSubtitleMs
                 : _decoder.GetCurrentTimeMs();
-            TimeSpan current = TimeSpan.FromMilliseconds(masterClockMs);
+            TimeSpan current = TimeSpan.FromMilliseconds(mediaClockMs);
             TimeSpan total = TimeSpan.FromMilliseconds(_decoder.DurationSeconds * 1000.0);
 
             UpdateSubtitleAt((int)current.TotalMilliseconds);
@@ -887,50 +1057,90 @@ namespace JonPlayer
             NotifyMouseActivity();
         }
 
+        private bool TryGetVideoGridMousePos(out Point pos, out double w, out double h)
+        {
+            pos = default;
+            w = h = 0;
+            try
+            {
+                if (VideoGrid == null) return false;
+                w = VideoGrid.ActualWidth;
+                h = VideoGrid.ActualHeight;
+                if (w <= 0 || h <= 0) return false;
+                pos = Mouse.GetPosition(VideoGrid);
+                return pos.X >= 0 && pos.X <= w && pos.Y >= 0 && pos.Y <= h;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsInFsBottomHotZone(Point pos, double h) => pos.Y > h - FsBottomHotZonePx;
+
+        private static bool IsInFsTopHotZone(Point pos) => pos.Y < FsTopHotZonePx;
+
+        private void UpdateFsChromeVisibility(bool forceHideChrome = false)
+        {
+            if (!_isFullscreen) return;
+
+            if (!TryGetVideoGridMousePos(out Point pos, out _, out double h))
+            {
+                if (forceHideChrome)
+                {
+                    if (!_isMouseOverFsExitBadge) HideFsExitBadge();
+                    if (!_isMouseOverFsStrip) HideFsBottomStrip();
+                }
+                return;
+            }
+
+            bool inBottomZone = IsInFsBottomHotZone(pos, h);
+            bool inTopZone = IsInFsTopHotZone(pos);
+            bool keepBottom = _isMouseOverFsStrip || inBottomZone;
+            bool keepTop = _isMouseOverFsExitBadge || inTopZone;
+
+            if (keepTop && !forceHideChrome)
+            {
+                ShowFsExitBadge();
+            }
+            else if (!keepTop)
+            {
+                HideFsExitBadge();
+            }
+
+            if (keepBottom && !forceHideChrome)
+            {
+                ShowFsBottomStrip();
+            }
+            else if (!keepBottom)
+            {
+                HideFsBottomStrip();
+            }
+        }
+
         // 전체화면 마우스 위치 추적 및 팝업 표시
         private void FsMousePollTimer_Tick(object? sender, EventArgs e)
         {
             if (!_isFullscreen) return;
 
-            try 
+            try
             {
                 Point pos = Mouse.GetPosition(VideoGrid);
-                if (double.IsNaN(_lastPolledMousePos.X)
+                bool mouseMoved = double.IsNaN(_lastPolledMousePos.X)
                     || Math.Abs(pos.X - _lastPolledMousePos.X) > 0.5
-                    || Math.Abs(pos.Y - _lastPolledMousePos.Y) > 0.5)
+                    || Math.Abs(pos.Y - _lastPolledMousePos.Y) > 0.5;
+                if (mouseMoved)
                 {
                     _lastPolledMousePos = pos;
                     NotifyMouseActivity();
                 }
-
-                double w = VideoGrid.ActualWidth;
-                double h = VideoGrid.ActualHeight;
-
-                if (pos.X >= 0 && pos.X <= w && pos.Y >= 0 && pos.Y <= h)
+                else if (_isMouseOverFsStrip || _isMouseOverFsExitBadge)
                 {
-                    if (pos.Y < 80)
-                    {
-                        ShowFsExitBadge();
-                    }
-                    else if (!_isMouseOverFsExitBadge)
-                    {
-                        HideFsExitBadge();
-                    }
+                    // Hovering on chrome without moving still counts as activity.
+                    NotifyMouseActivity();
+                }
 
-                    if (pos.Y > h - 130)
-                    {
-                        ShowFsBottomStrip();
-                    }
-                    else if (!_isMouseOverFsStrip)
-                    {
-                        FsBottomStrip.Visibility = Visibility.Collapsed;
-                    }
-                }
-                else
-                {
-                    if (!_isMouseOverFsExitBadge) HideFsExitBadge();
-                    if (!_isMouseOverFsStrip) FsBottomStrip.Visibility = Visibility.Collapsed;
-                }
+                UpdateFsChromeVisibility();
             }
             catch { /* safe fallback */ }
         }
@@ -953,27 +1163,43 @@ namespace JonPlayer
             }
         }
 
+        private void HideFsBottomStrip()
+        {
+            if (_isFullscreen)
+            {
+                FsBottomStrip.Visibility = Visibility.Collapsed;
+            }
+        }
+
         private void RestartFsHideTimer()
         {
             // Auto hide timer is handled by mouse position polling
         }
 
-        private void FsExitBadge_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e) => _isMouseOverFsExitBadge = true;
+        private void FsExitBadge_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            _isMouseOverFsExitBadge = true;
+            NotifyMouseActivity();
+            ShowFsExitBadge();
+        }
+
         private void FsExitBadge_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
         {
             _isMouseOverFsExitBadge = false;
-            if (_isFullscreen) HideFsExitBadge();
+            UpdateFsChromeVisibility();
         }
 
         private void FsBottomStrip_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
         {
             _isMouseOverFsStrip = true;
+            NotifyMouseActivity();
+            ShowFsBottomStrip();
         }
 
         private void FsBottomStrip_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
         {
             _isMouseOverFsStrip = false;
-            if (_isFullscreen) FsBottomStrip.Visibility = Visibility.Collapsed;
+            UpdateFsChromeVisibility();
         }
 
         private void BtnMinimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
@@ -1104,30 +1330,6 @@ namespace JonPlayer
         private void BtnOpen_Click(object sender, RoutedEventArgs e) => OpenFile();
         private void BtnOpenUrl_Click(object sender, RoutedEventArgs e) => OpenUrl();
 
-        public class PlaylistItem : System.ComponentModel.INotifyPropertyChanged
-        {
-            public string Name { get; set; } = string.Empty;
-            public string Path { get; set; } = string.Empty;
-            public string? AudioPath { get; set; }
-            public string? YoutubeUrl { get; set; }
-
-            private bool _isCurrentlyPlaying;
-            public bool IsCurrentlyPlaying
-            {
-                get => _isCurrentlyPlaying;
-                set
-                {
-                    if (_isCurrentlyPlaying != value)
-                    {
-                        _isCurrentlyPlaying = value;
-                        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(IsCurrentlyPlaying)));
-                    }
-                }
-            }
-
-            public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
-        }
-
         // Drag state for playlist overlay
         private bool   _isPlaylistDragging;
         private Point  _playlistDragStart;
@@ -1142,297 +1344,23 @@ namespace JonPlayer
         private System.Collections.ObjectModel.ObservableCollection<PlaylistItem> _playlist = new System.Collections.ObjectModel.ObservableCollection<PlaylistItem>();
         private int _playlistIndex = -1;
 
-        private void OpenFile()
-        {
-            var dlg = new OpenFileDialog
-            {
-                Title  = "Open Media File",
-                Filter = "Supported Media Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts;*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|Video Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts|Audio Files|*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|All Files (*.*)|*.*",
-                Multiselect = true
-            };
-            
-            if (!string.IsNullOrEmpty(_lastOpenDirectory))
-                dlg.InitialDirectory = _lastOpenDirectory;
-            else
-                dlg.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
-
-            if (dlg.ShowDialog() == true)
-            {
-                _lastOpenDirectory = Path.GetDirectoryName(dlg.FileName);
-                LoadPlaylist(dlg.FileNames);
-            }
-        }
-
-        private void OpenUrl()
-        {
-            var dlg = new InputWindow();
-            dlg.Owner = this;
-            dlg.Resources = this.Resources;
-            if (dlg.ShowDialog() == true)
-            {
-                var url = dlg.InputUrl;
-                if (!string.IsNullOrEmpty(url))
-                {
-                    if (IsStreamingPath(url))
-                    {
-                        TxtNowPlaying.Text = $"Loading... {url}";
-                        StartStreamingLoadingBlink();
-                    }
-                    LoadPlaylist(new[] { url });
-                }
-            }
-        }
-
-        private void OpenFolder()
-        {
-            using (var dialog = new System.Windows.Forms.FolderBrowserDialog())
-            {
-                dialog.Description = "Select a folder containing media files";
-                dialog.UseDescriptionForTitle = true;
-                
-                if (!string.IsNullOrEmpty(_lastOpenDirectory))
-                    dialog.SelectedPath = _lastOpenDirectory;
-
-                if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
-                {
-                    _lastOpenDirectory = dialog.SelectedPath;
-                    var extensions = new[] { ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".ts", ".m2ts", ".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a" };
-                    var files = Directory.GetFiles(dialog.SelectedPath, "*.*", SearchOption.AllDirectories)
-                        .Where(f => extensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
-                        .ToArray();
-
-                    if (files.Length > 0)
-                        LoadPlaylist(files);
-                }
-            }
-        }
-
-        private void UpdateNowPlayingHighlight()
-        {
-            for (int i = 0; i < _playlist.Count; i++)
-                _playlist[i].IsCurrentlyPlaying = (i == _playlistIndex);
-
-            // Update count badge
-            if (TxtPlaylistCount != null)
-                TxtPlaylistCount.Text = _playlist.Count.ToString();
-
-            // Scroll to current item
-            if (_playlistIndex >= 0 && _playlistIndex < _playlist.Count)
-                ListPlaylist.ScrollIntoView(_playlist[_playlistIndex]);
-        }
-
-        private static readonly HashSet<string> _allowedExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
-            ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a"
-        };
-
-        private async void LoadPlaylist(string[] files)
-        {
-            if (_isClosing) return;
-
-            _playlist.Clear();
-            _playedIndices.Clear();
-            
-            var youtube = new YoutubeExplode.YoutubeClient();
-
-            foreach (var f in files) 
-            {
-                if (_isClosing) return;
-
-                string path = f;
-                string? audioPath = null;
-                string? youtubeUrl = null;
-                bool isYoutube = f.Contains("youtube.com") || f.Contains("youtu.be");
-                string title = isYoutube ? f : System.IO.Path.GetFileName(f);
-
-                if (isYoutube)
-                {
-                    try
-                    {
-                        var video = await youtube.Videos.GetAsync(f);
-                        if (_isClosing) return;
-                        title = video.Title;
-                        var streamUrl = await _streamingService.GetStreamUrlAsync(f);
-                        if (_isClosing) return;
-                        if (streamUrl != null)
-                        {
-                            path = streamUrl;
-                            audioPath = _streamingService.LastAudioUrl;
-                            youtubeUrl = f;
-                        }
-                        else
-                        {
-                            System.Windows.MessageBox.Show("해당 스트리밍 영상의 스트리밍 주소를 가져올 수 없습니다.\n(제한된 영상이거나 정책 변경으로 인해 차단되었을 수 있습니다.)", "스트리밍 오류", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
-                            continue;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Windows.MessageBox.Show($"스트리밍 영상을 불러오는데 실패했습니다:\n{ex.Message}", "스트리밍 오류", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
-                        continue;
-                    }
-                }
-
-                bool isUrl = path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || 
-                             path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
-                             path.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase) ||
-                             path.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase);
-
-                string ext = System.IO.Path.GetExtension(f);
-                if (isUrl || _allowedExts.Contains(ext))
-                {
-                    _playlist.Add(new PlaylistItem { Name = isUrl && !isYoutube ? f : title, Path = path, AudioPath = audioPath, YoutubeUrl = youtubeUrl });
-                }
-            }
-
-            ListPlaylist.ItemsSource = _playlist;
-
-            if (_isClosing) return;
-
-            if (_playlist.Count > 0)
-            {
-                _playlistIndex = 0;
-                PlayFile(_playlist[_playlistIndex].Path);
-                UpdateNowPlayingHighlight();
-                
-                if (_playlist.Count > 1)
-                {
-                    BtnPlaylistToggle.IsEnabled = true;
-                    BtnPlaylistToggleFS.IsEnabled = true;
-                    ShowPlaylistBriefly();
-                }
-            }
-            else
-            {
-                StopStreamingLoadingBlink();
-            }
-
-            if (TxtPlaylistCount != null)
-                TxtPlaylistCount.Text = _playlist.Count.ToString();
-        }
-
-        private void ListPlaylist_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
-        {
-            if (ListPlaylist.SelectedItem is PlaylistItem item)
-            {
-                _playlistIndex = _playlist.IndexOf(item);
-                _playedIndices.Clear();
-                PlayFile(item.Path);
-                UpdateNowPlayingHighlight();
-            }
-        }
-
-        private void ListPlaylist_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
-        {
-            if (e.Key == Key.Delete && ListPlaylist.SelectedItem is PlaylistItem item)
-            {
-                int idx = _playlist.IndexOf(item);
-                if (idx != -1)
-                {
-                    _playlist.RemoveAt(idx);
-                    if (idx == _playlistIndex)
-                    {
-                        if (_playlist.Count > 0)
-                        {
-                            _playlistIndex = idx % _playlist.Count;
-                            PlayFile(_playlist[_playlistIndex].Path);
-                        }
-                        else
-                        {
-                            _playlistIndex = -1;
-                            CloseFile();
-                        }
-                    }
-                    else if (idx < _playlistIndex)
-                    {
-                        _playlistIndex--;
-                    }
-                }
-                if (_playlist.Count <= 1)
-                {
-                    BtnPlaylistToggle.IsEnabled = false;
-                    BtnPlaylistToggleFS.IsEnabled = false;
-                    PlaylistOverlay.Visibility = Visibility.Collapsed;
-                }
-                e.Handled = true;
-            }
-        }
-
-        private void BtnPlaylistToggle_Click(object sender, RoutedEventArgs e)
-        {
-            TogglePlaylist();
-        }
-
-        private void TogglePlaylist()
-        {
-            if (PlaylistOverlay.Visibility == Visibility.Visible)
-            {
-                PlaylistOverlay.Visibility = Visibility.Collapsed;
-            }
-            else
-            {
-                PlaylistOverlay.Visibility = Visibility.Visible;
-                StartPlaylistHideTimer();
-            }
-        }
-
-        private void PlaylistOverlay_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
-        {
-            _isPlaylistHovered = true;
-            _playlistTimer?.Stop();
-        }
-
-        private void PlaylistOverlay_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
-        {
-            _isPlaylistHovered = false;
-            StartPlaylistHideTimer();
-        }
-
-        private void ShowPlaylistBriefly()
-        {
-            PlaylistOverlay.Visibility = Visibility.Visible;
-            StartPlaylistHideTimer();
-        }
-
-        private void StartPlaylistHideTimer()
-        {
-            _playlistTimer?.Stop();
-            _playlistTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-            _playlistTimer.Tick += (s, e) =>
-            {
-                if (!_isPlaylistHovered && !PlaylistOverlay.IsKeyboardFocusWithin)
-                {
-                    PlaylistOverlay.Visibility = Visibility.Collapsed;
-                }
-                _playlistTimer.Stop();
-            };
-            _playlistTimer.Start();
-        }
-
-        private void BtnPlaylistAdd_Click(object sender, RoutedEventArgs e)
-        {
-            var dlg = new OpenFileDialog
-            {
-                Multiselect = true,
-                Filter = "Supported Media Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts;*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|Video Files|*.mp4;*.mkv;*.avi;*.mov;*.wmv;*.flv;*.webm;*.ts;*.m2ts|Audio Files|*.mp3;*.flac;*.wav;*.aac;*.ogg;*.m4a|All Files (*.*)|*.*"
-            };
-            if (dlg.ShowDialog() == true)
-            {
-                foreach (var f in dlg.FileNames)
-                {
-                    _playlist.Add(new PlaylistItem { Name = Path.GetFileName(f), Path = f });
-                }
-                BtnPlaylistToggle.IsEnabled = _playlist.Count > 1;
-                BtnPlaylistToggleFS.IsEnabled = _playlist.Count > 1;
-                UpdateNowPlayingHighlight();
-            }
-        }
-
-        private void BtnPlaylistClose_Click(object sender, RoutedEventArgs e)
-        {
-            PlaylistOverlay.Visibility = Visibility.Collapsed;
-        }
+        // === PLAYLIST PREV/NEXT NAV PROTECTION ZONE ===
+        // Core contract (do not accidentally break when touching playlist nav, PlayFile, or finished callbacks):
+        // - All user-initiated prev/next/double-click/enter/delete-next etc. MUST route through
+        //   NavigateToPlaylistIndex (which handles pending + highlight + decide whether to PlayFile).
+        // - _playlistIndex updated *immediately* for responsive UI/highlight/title.
+        // - If load in progress (_isOpeningFile), record _pendingPlaylistTarget, bump _openGeneration
+        //   (aborts in-flight load before it commits), update highlight, *do not* call PlayFile yet.
+        // - TryApplyPendingPlaylistTarget is the single point that drains/starts a pending target.
+        //   It is called from: PlayFile finally (on success), abort mismatch paths (after release _isOpening),
+        //   and finished handler (when suppressing auto-next).
+        // - Direct mutations of _playlistIndex (delete shift, move reorder) MUST be followed by
+        //   UpdateNowPlayingHighlight() and must not leave pending inconsistent.
+        // - Index normalization + boundary guards in PlayPrev/PlayNext.
+        // - Combined with openGeneration + captured-gen PlaybackFinished + early gen checks in PlayFile
+        //   this prevents overlapping loads, stale auto-advance fighting user nav, and state desync.
+        // This ensures prev/next actually switches the video reliably and stably.
+        // DO NOT break this zone without updating call sites + this comment (like SEEK UX PROTECTION).
 
         private void BtnShortcutsClose_Click(object sender, RoutedEventArgs e)
         {
@@ -1472,97 +1400,6 @@ namespace JonPlayer
             e.Handled = true;
         }
 
-        // ── Playlist drag-to-move ──────────────────────────────────────────
-        private void PlaylistOverlay_DragStart(object sender, MouseButtonEventArgs e)
-        {
-            _isPlaylistDragging = true;
-            _playlistDragStart  = e.GetPosition(VideoGrid);
-            var tx = PlaylistTranslate;
-            _playlistDragOriginX = tx.X;
-            _playlistDragOriginY = tx.Y;
-            (sender as UIElement)?.CaptureMouse();
-            e.Handled = true;
-        }
-
-        private void PlaylistOverlay_DragMove(object sender, System.Windows.Input.MouseEventArgs e)
-        {
-            if (!_isPlaylistDragging) return;
-            var current = e.GetPosition(VideoGrid);
-            var tx = PlaylistTranslate;
-
-            double newX = _playlistDragOriginX + (current.X - _playlistDragStart.X);
-            double newY = _playlistDragOriginY + (current.Y - _playlistDragStart.Y);
-
-            double minX = -(VideoGrid.ActualWidth - PlaylistOverlay.Margin.Right - PlaylistOverlay.ActualWidth);
-            double maxX = PlaylistOverlay.Margin.Right;
-            if (minX > maxX) minX = maxX;
-
-            double minY = -(VideoGrid.ActualHeight - PlaylistOverlay.Margin.Bottom - PlaylistOverlay.ActualHeight);
-            double maxY = PlaylistOverlay.Margin.Bottom;
-            if (minY > maxY) minY = maxY;
-
-            tx.X = Math.Max(minX, Math.Min(newX, maxX));
-            tx.Y = Math.Max(minY, Math.Min(newY, maxY));
-
-            e.Handled = true;
-        }
-
-        private void PlaylistOverlay_DragEnd(object sender, MouseButtonEventArgs e)
-        {
-            _isPlaylistDragging = false;
-            (sender as UIElement)?.ReleaseMouseCapture();
-            e.Handled = true;
-        }
-
-
-
-        private void NextVideoOverlay_Click(object sender, RoutedEventArgs e)
-        {
-            NextVideoOverlay.Visibility = Visibility.Collapsed;
-            if (_playlist.Count > 1 && _playlistIndex >= 0 && _playlistIndex < _playlist.Count - 1)
-            {
-                _playlistIndex++;
-                PlayFile(_playlist[_playlistIndex].Path);
-                UpdateNowPlayingHighlight();
-            }
-        }
-
-        private void BtnMoveUp_Click(object sender, RoutedEventArgs e)
-        {
-            var btn = sender as WpfButton;
-            var item = btn?.DataContext as PlaylistItem;
-            if (item != null)
-            {
-                int index = _playlist.IndexOf(item);
-                if (index > 0)
-                {
-                    var currentlyPlaying = _playlistIndex >= 0 && _playlistIndex < _playlist.Count ? _playlist[_playlistIndex] : null;
-                    _playlist.Move(index, index - 1);
-                    if (currentlyPlaying != null) _playlistIndex = _playlist.IndexOf(currentlyPlaying);
-                }
-            }
-        }
-
-        private void BtnMoveDown_Click(object sender, RoutedEventArgs e)
-        {
-            var btn = sender as WpfButton;
-            var item = btn?.DataContext as PlaylistItem;
-            if (item != null)
-            {
-                int index = _playlist.IndexOf(item);
-                if (index >= 0 && index < _playlist.Count - 1)
-                {
-                    var currentlyPlaying = _playlistIndex >= 0 && _playlistIndex < _playlist.Count ? _playlist[_playlistIndex] : null;
-                    _playlist.Move(index, index + 1);
-                    if (currentlyPlaying != null) _playlistIndex = _playlist.IndexOf(currentlyPlaying);
-                }
-            }
-        }
-
-        private void UpdatePlaylistIndexAfterReorder()
-        {
-        }
-
         private static T? FindAncestor<T>(DependencyObject current) where T : DependencyObject
         {
             do
@@ -1600,40 +1437,69 @@ namespace JonPlayer
 
         private string? _currentFilePath;
         private bool _isOpeningFile = false;
+        // Which openGeneration currently owns the _isOpeningFile lock (0 = none).
+        // Prevents a superseded PlayFile from leaving the flag stuck true, which blocks
+        // all subsequent playlist auto-advance / prev / next (pending never drains).
+        private int _openingOwnedByGen = 0;
+        private volatile int _currentPlaybackOpenGen = 0;
+        private Action? _activePlaybackFinishedHandler;
+        // === PLAYLIST RAPID NAV + FINISH RACE PROTECTION ===
+        // Rapid previous after playing several playlist items in sequence could cause:
+        // - Stale Decoder_PlaybackFinished (from ended/abandoned item) to call PlayNext and overlap PlayFile
+        // - Concurrent dispose of decoder/renderer + new creation -> crash / DisplayFPS=0
+        // Protections: captured 'finishedGen' per subscription, early gen checks before destructive switch,
+        // bumping _openGeneration from Play* to abort superseded loads, _currentPlaybackOpenGen + live checks.
+        // New approach per user: Do NOT process every rapid press as separate loads (unstable).
+        // Accept user input immediately (update highlight + pending), but only *act* (PlayFile) after the
+        // previous internal process (Open/decoder/renderer init) has fully settled. Coalesces rapid presses.
+        // Opening lock ownership: each PlayFile stamps _openingOwnedByGen; only that gen may clear
+        // _isOpeningFile. finally always releases if still owned and then drains _pendingPlaylistTarget.
+        private int? _pendingPlaylistTarget = null;
         private YouTubeStreamingService _streamingService = new YouTubeStreamingService();
         private bool _isYoutubeDownloadInProgress;
 
         private void PlayPrev()
         {
-            if (_isOpeningFile) return;
-            if (_playlist.Count > 0)
+            if (_playlist.Count == 0) return;
+
+            // Safety: ensure index is valid before computing prev target.
+            if (_playlistIndex < 0 || _playlistIndex >= _playlist.Count)
             {
-                if (_isShuffle)
+                _playlistIndex = 0;
+            }
+
+            int target;
+            if (_isShuffle)
+            {
+                if (_playlist.Count > 1)
                 {
-                    if (_playlist.Count > 1)
-                    {
-                        int nextIndex;
-                        do {
-                            nextIndex = Random.Shared.Next(_playlist.Count);
-                        } while (nextIndex == _playlistIndex);
-                        _playlistIndex = nextIndex;
-                    }
-                    PlayFile(_playlist[_playlistIndex].Path);
-                    UpdateNowPlayingHighlight();
+                    int nextIndex;
+                    do {
+                        nextIndex = Random.Shared.Next(_playlist.Count);
+                    } while (nextIndex == _playlistIndex);
+                    target = nextIndex;
                 }
-                else if (_playlistIndex > 0)
+                else
                 {
-                    _playlistIndex--;
-                    PlayFile(_playlist[_playlistIndex].Path);
-                    UpdateNowPlayingHighlight();
-                }
-                else if (_isRepeat)
-                {
-                    _playlistIndex = _playlist.Count - 1;
-                    PlayFile(_playlist[_playlistIndex].Path);
-                    UpdateNowPlayingHighlight();
+                    target = _playlistIndex;
                 }
             }
+            else if (_playlistIndex > 0)
+            {
+                target = _playlistIndex - 1;
+            }
+            else if (_isRepeat)
+            {
+                target = _playlist.Count - 1;
+            }
+            else
+            {
+                return;
+            }
+
+            // Use the navigator: accepts rapid inputs (updates UI + pending) but never starts
+            // a new PlayFile while another is opening. Internal load process gets to complete.
+            NavigateToPlaylistIndex(target);
         }
 
         private void BtnPrev_Click(object sender, RoutedEventArgs e) => PlayPrev();
@@ -1641,65 +1507,197 @@ namespace JonPlayer
 
         private bool PlayNext()
         {
-            if (_isOpeningFile) return false;
-            if (_playlist.Count > 0)
+            if (_playlist.Count == 0) return false;
+
+            // Safety: ensure index is valid before computing next target.
+            if (_playlistIndex < 0 || _playlistIndex >= _playlist.Count)
             {
-                if (_isShuffle)
+                _playlistIndex = 0;
+            }
+
+            int target;
+            if (_isShuffle)
+            {
+                _playedIndices.Add(_playlistIndex);
+
+                if (_playedIndices.Count >= _playlist.Count)
                 {
+                    if (!_isRepeat) return false;
+                    _playedIndices.Clear();
                     _playedIndices.Add(_playlistIndex);
-
-                    if (_playedIndices.Count >= _playlist.Count)
-                    {
-                        if (!_isRepeat) return false;
-                        _playedIndices.Clear();
-                        _playedIndices.Add(_playlistIndex);
-                    }
-
-                    if (_playlist.Count > 1)
-                    {
-                        int nextIndex;
-                        do {
-                            nextIndex = Random.Shared.Next(_playlist.Count);
-                        } while (nextIndex == _playlistIndex || _playedIndices.Contains(nextIndex));
-                        _playlistIndex = nextIndex;
-                    }
-                    PlayFile(_playlist[_playlistIndex].Path);
-                    UpdateNowPlayingHighlight();
-                    return true;
                 }
-                else if (_playlistIndex < _playlist.Count - 1)
+
+                if (_playlist.Count > 1)
                 {
-                    _playlistIndex++;
-                    PlayFile(_playlist[_playlistIndex].Path);
-                    UpdateNowPlayingHighlight();
-                    return true;
+                    int nextIndex;
+                    do {
+                        nextIndex = Random.Shared.Next(_playlist.Count);
+                    } while (nextIndex == _playlistIndex || _playedIndices.Contains(nextIndex));
+                    target = nextIndex;
                 }
-                else if (_isRepeat)
+                else
                 {
-                    _playlistIndex = 0;
-                    PlayFile(_playlist[_playlistIndex].Path);
-                    UpdateNowPlayingHighlight();
-                    return true;
+                    target = _playlistIndex;
                 }
             }
-            return false;
+            else if (_playlistIndex < _playlist.Count - 1)
+            {
+                target = _playlistIndex + 1;
+            }
+            else if (_isRepeat)
+            {
+                target = 0;
+            }
+            else
+            {
+                return false;
+            }
+
+            // Centralized navigator: coalesces rapid presses. Internal process (decoder open,
+            // renderer setup, etc.) completes before acting on next user request.
+            NavigateToPlaylistIndex(target);
+            return true;
+        }
+
+        /// <summary>
+        /// Centralized playlist navigation request.
+        /// - Always updates highlight and _playlistIndex immediately (responsive UI).
+        /// - If a load is in progress, records as _pendingPlaylistTarget and does NOT start overlapping PlayFile.
+        /// - The pending target is applied only after the current PlayFile fully settles (in finally) or
+        ///   when a natural PlaybackFinished occurs and we decide not to auto-advance.
+        /// This prioritizes internal stability (one PlayFile/Open/Dispose cycle at a time) over blindly
+        /// honoring every rapid button press as a separate action.
+        /// </summary>
+        private void NavigateToPlaylistIndex(int targetIndex)
+        {
+            if (targetIndex < 0 || targetIndex >= _playlist.Count || _playlist.Count == 0)
+                return;
+
+            if (!_isOpeningFile)
+            {
+                _pendingPlaylistTarget = null;
+                _playlistIndex = targetIndex;
+                UpdateNowPlayingHighlight();
+                PlayFile(_playlist[targetIndex].Path);
+                return;
+            }
+
+            // Busy with a previous internal load (decoder Open + renderer creation etc.).
+            // Accept the user's input (update desired target + UI), bump generation so the
+            // *current* in-flight load aborts before it fully presents/attaches (avoids flicker
+            // to wrong intermediate item), but do NOT launch another PlayFile now.
+            // When the aborted load's continuation hits its gen-mismatch returns, it will release
+            // the flag and TryApplyPending will launch the final desired target cleanly.
+            Interlocked.Increment(ref _openGeneration);
+            _pendingPlaylistTarget = targetIndex;
+            _playlistIndex = targetIndex;
+            UpdateNowPlayingHighlight();
+            // Internal process gets priority; next input will be accepted after this one settles/aborts.
+        }
+
+        private void TryApplyPendingPlaylistTarget()
+        {
+            if (!_pendingPlaylistTarget.HasValue)
+                return;
+
+            int target = _pendingPlaylistTarget.Value;
+            _pendingPlaylistTarget = null;
+
+            if (target >= 0 && target < _playlist.Count)
+            {
+                // Always start the load for a pending target when applying (e.g. after aborting an
+                // intermediate load due to newer nav). The optimistic _playlistIndex may already
+                // be set, but we still need to launch PlayFile for it now that previous process ended.
+                _playlistIndex = target;
+                if (_isOpeningFile)
+                {
+                    // Rare: re-pend it so a later apply or the current's abort path will pick it.
+                    _pendingPlaylistTarget = target;
+                }
+                else
+                {
+                    PlayFile(_playlist[target].Path);
+                }
+                UpdateNowPlayingHighlight();
+            }
+        }
+
+        /// <summary>
+        /// Release the PlayFile opening lock only if <paramref name="openGeneration"/> still owns it.
+        /// Safe when a newer PlayFile has already taken ownership.
+        /// </summary>
+        private void ReleaseOpeningIfOwned(int openGeneration)
+        {
+            if (Volatile.Read(ref _openingOwnedByGen) == openGeneration)
+            {
+                Volatile.Write(ref _openingOwnedByGen, 0);
+                _isOpeningFile = false;
+            }
+        }
+
+        /// <summary>
+        /// End of an open attempt: drop our lock if we still hold it, then start any pending nav.
+        /// Critical when NavigateToPlaylistIndex bumped gen while we were busy — without this,
+        /// _isOpeningFile stays true forever and playlist next/prev only update the highlight.
+        /// </summary>
+        private void CompleteOpenAttempt(int openGeneration)
+        {
+            ReleaseOpeningIfOwned(openGeneration);
+            // Drain pending whenever nothing is actively opening. Covers: success, abort, and
+            // "superseded by Navigate-only (pending set, no new PlayFile yet)".
+            if (!_isOpeningFile)
+                TryApplyPendingPlaylistTarget();
         }
 
         private void Decoder_PlaybackFinished()
+        {
+            // Legacy no-arg path (kept for safety). Treat as possibly-stale; real protection uses captured-gen path.
+            Decoder_PlaybackFinishedCaptured(Volatile.Read(ref _openGeneration));
+        }
+
+        private void Decoder_PlaybackFinishedCaptured(int finishedGen)
         {
             // Use BeginInvoke (async) instead of Invoke (sync) to prevent deadlock
             // when decoder thread waits for UI and UI waits for decoder.Stop()/Join()
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                int liveGen = Volatile.Read(ref _openGeneration);
+                // Key hardening for rapid prev after sequential playlist playback:
+                // Only the finish whose captured gen exactly matches the last *successfully started*
+                // playback is allowed to trigger auto-PlayNext. Late finishes from videos that were
+                // abandoned via Prev (or fast nav) will have mismatched gen and are ignored.
+                // This prevents stale PlaybackFinished from starting overlapping PlayFile while
+                // user is mashing previous (or during finish+prev races), which led to concurrent
+                // dispose/renderer/decoder creation and crashes (incl. DisplayFPS=0 symptoms).
+                if (finishedGen != _currentPlaybackOpenGen || finishedGen != liveGen)
+                {
+                    return;
+                }
                 _userWantsPlayback = false;
                 UpdatePlayPauseUI(false);
-                if (!PlayNext())
+
+                bool hasPendingUserNav = _pendingPlaylistTarget.HasValue;
+
+                if (!hasPendingUserNav && PlayNext())
                 {
+                    // Normal auto-advance: PlayNext → NavigateToPlaylistIndex may either start
+                    // PlayFile immediately or only record pending if a load is in progress.
+                    // If only pending was set, drain it now that this playback is done.
+                    if (_pendingPlaylistTarget.HasValue && !_isOpeningFile)
+                        TryApplyPendingPlaylistTarget();
+                }
+                else
+                {
+                    // Either end of list/repeat off, or user has expressed explicit pending navigation
+                    // (rapid prev after sequential play). Prioritize user's last input over auto-next.
+                    // Do not start conflicting PlayFile here.
                     StopStreamingLoadingBlink();
                     if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
                     if (AudioUI != null) AudioUI.Visibility = Visibility.Collapsed;
                     if (ImgSplash != null) ImgSplash.Visibility = Visibility.Visible;
                     
+                    _currentPlaybackOpenGen = 0;
+                    _activePlaybackFinishedHandler = null;
                     _isUpdatingFromPlayer = true;
                     if (SliderTimeline != null) 
                     {
@@ -1719,6 +1717,9 @@ namespace JonPlayer
                     if (TxtTotalTime != null) TxtTotalTime.Text = "00:00:00";
                     if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = "00:00:00";
                     if (TxtTotalTimeFS != null) TxtTotalTimeFS.Text = "00:00:00";
+
+                    PauseUiClock();
+                    _uiClockBaseMs = 0.0;
                     
                     SetRandomVibe();
                     Title = "JonPlayer";
@@ -1727,9 +1728,15 @@ namespace JonPlayer
                     {
                         var oldDec = _decoder;
                         _decoder = null;
+                        oldDec.Stop();
                         DetachDecoderEvents(oldDec);
+                        DisposeRendererSafe();
                         DisposeDecoderInBackground(oldDec);
                     }
+
+                    // Apply any pending user navigation now that this playback has ended cleanly
+                    // and we avoided auto-advance. This is the "process after previous is done" point.
+                    TryApplyPendingPlaylistTarget();
                 }
             }));
         }
@@ -1737,6 +1744,11 @@ namespace JonPlayer
         private void DetachDecoderEvents(FFmpegMediaDecoder decoder)
         {
             if (decoder == null) return;
+            if (_activePlaybackFinishedHandler != null)
+            {
+                decoder.PlaybackFinished -= _activePlaybackFinishedHandler;
+                _activePlaybackFinishedHandler = null;
+            }
             decoder.PlaybackFinished -= Decoder_PlaybackFinished;
             decoder.FrameDecoded -= Decoder_FrameDecoded;
             decoder.AudioDataAvailable -= Decoder_AudioDataAvailable;
@@ -1746,20 +1758,102 @@ namespace JonPlayer
             decoder.SeekPerformed -= Decoder_SeekPerformed;
         }
 
-        private static void DisposeDecoderInBackground(FFmpegMediaDecoder decoder)
+        private void DisposeRendererSafe()
         {
-            Task.Run(() =>
+            if (_renderer == null)
+            {
+                return;
+            }
+            try
+            {
+                // Stop frame pulls before joining render thread / freeing D3D.
+                _renderer.DetachDecoder();
+                _renderer.PrepareForDecoderTeardown();
+                _renderer.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("DisposeRendererSafe failed", ex);
+            }
+            finally
+            {
+                _renderer = null;
+            }
+        }
+
+        /// <summary>
+        /// Safe order for next-track / close:
+        /// 1) Detach render from decoder (no more PullVideoFrame)
+        /// 2) Drop held frames while decoder native memory still valid
+        /// 3) Stop + dispose decoder (frees SW pools / D3D11VA)
+        /// 4) Dispose renderer (join render thread, free device)
+        /// Wrong order (dispose decoder while render still maps NV12/HW) → AV 0xC0000005.
+        /// </summary>
+        private async Task TeardownActivePlaybackAsync(FFmpegMediaDecoder decoder)
+        {
+            DetachDecoderEvents(decoder);
+
+            var renderer = _renderer;
+            if (renderer != null)
             {
                 try
                 {
-                    decoder.Stop();
+                    renderer.DetachDecoder();
+                    renderer.PrepareForDecoderTeardown(); // black + free held frames while decoder alive
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error("Renderer detach/teardown prep failed", ex);
+                }
+            }
+
+            try
+            {
+                decoder.Stop();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Decoder Stop failed during teardown", ex);
+            }
+
+            await DisposeDecoderAsync(decoder);
+
+            // Renderer dispose after decoder: in-flight GPU copies already finished in Prepare + Join.
+            if (renderer != null && ReferenceEquals(_renderer, renderer))
+            {
+                DisposeRendererSafe();
+            }
+            else if (renderer != null)
+            {
+                try { renderer.Dispose(); } catch { /* superseded */ }
+            }
+        }
+
+        private void AbortDecoderLoad(FFmpegMediaDecoder decoder)
+        {
+            DetachDecoderEvents(decoder);
+            DisposeRendererSafe();
+            try { decoder.Dispose(); } catch { /* ignore */ }
+        }
+
+        private static Task DisposeDecoderAsync(FFmpegMediaDecoder decoder)
+        {
+            return Task.Run(() =>
+            {
+                try
+                {
                     decoder.Dispose();
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error("Failed to dispose decoder in background", ex);
+                    Logger.Error("Failed to dispose decoder", ex);
                 }
             });
+        }
+
+        private static void DisposeDecoderInBackground(FFmpegMediaDecoder decoder)
+        {
+            _ = DisposeDecoderAsync(decoder);
         }
 
         private async void PlayFile(string path, double startRatio = 0.0)
@@ -1777,7 +1871,14 @@ namespace JonPlayer
                 Interlocked.Increment(ref _streamingSeekGeneration);
             }
             _isOpeningFile = true;
+            Volatile.Write(ref _openingOwnedByGen, openGeneration);
+            _isSeeking = false;
+            _pendingSeekSubtitleMs = -1.0;
+            _lastUserSeekTargetMs = -1.0;
             _allowTimelineBackward = true;
+
+            PauseUiClock();
+            _uiClockBaseMs = startRatio * 1000.0; // will be corrected in StartUiClock after decoder ready
 
             Dispatcher.Invoke(() =>
             {
@@ -1795,11 +1896,22 @@ namespace JonPlayer
             try
             {
                 _currentFilePath = path;
+
+                // If this PlayFile corresponds to the item the user last requested via rapid nav,
+                // consume the pending so we don't re-apply it after we settle.
+                if (_playlistIndex >= 0 && _playlistIndex < _playlist.Count &&
+                    _playlist[_playlistIndex].Path == path)
+                {
+                    _pendingPlaylistTarget = null;
+                }
+
                 bool canUseCcButton = !isUrl || !string.IsNullOrEmpty(GetCurrentYoutubeUrl(path));
                 if (BtnWhisper != null) BtnWhisper.IsEnabled = canUseCcButton;
                 if (BtnWhisperFS != null) BtnWhisperFS.IsEnabled = canUseCcButton;
                 _openCount++;
                 _audioUnderrunCount = 0;
+                _lastAutoGainDb = 0.0;
+                _lastDetectedMeanDb = double.NaN;
 
                 TxtNowPlaying.Text = isUrl ? $"Loading... {displayName}" : "Loading...";
                 
@@ -1808,7 +1920,10 @@ namespace JonPlayer
                 else StopStreamingLoadingBlink();
 
                 // 이전 재생 즉시 정지 (오디오 + 자막 + AI 추출)
+                // CRITICAL: do NOT ResetFrameResources / free decoder native pools while the
+                // render thread may still PullVideoFrame — that caused 0xC0000005 on next-track.
                 _waveOut?.Stop();
+                try { _waveProvider?.ClearBuffer(); } catch { /* ignore */ }
                 _subtitleManager.Clear();
                 _subtitlesEnabled = false;
                 Interlocked.Increment(ref _subtitleLoadGeneration);
@@ -1821,25 +1936,61 @@ namespace JonPlayer
                 
                 if (oldDecoder != null)
                 {
-                    oldDecoder.Stop();
-                    DetachDecoderEvents(oldDecoder);
-                    DisposeDecoderInBackground(oldDecoder);
+                    await TeardownActivePlaybackAsync(oldDecoder);
+                }
+
+                // Abort superseded switch (e.g. rapid prev/next during previous PlayFile's async window).
+                // Prevents this continuation from disposing or overwriting renderer/decoder created
+                // by a later user nav intent.
+                if (openGeneration != Volatile.Read(ref _openGeneration))
+                {
+                    // Superseded by later user nav while we were disposing old. Release so the final
+                    // desired target can be started cleanly by TryApply (called below or from other paths).
+                    _activePlaybackFinishedHandler = null;
+                    _currentPlaybackOpenGen = 0;
+                    CompleteOpenAttempt(openGeneration);
+                    return;
                 }
 
                 newDecoder = new FFmpegMediaDecoder();
                 newDecoder.SetSpeed(_currentSpeed);
 
-                if (_renderer != null) { _renderer.Dispose(); _renderer = null; }
+                // Re-check before touching shared renderer (created here and tied to this gen's decoder for HW).
+                // A racing higher-gen PlayFile (rapid prev) may have already swapped renderer for its target.
+                if (openGeneration != Volatile.Read(ref _openGeneration))
+                {
+                    newDecoder.Dispose();
+                    _activePlaybackFinishedHandler = null;
+                    _currentPlaybackOpenGen = 0;
+                    CompleteOpenAttempt(openGeneration);
+                    return;
+                }
+
+                // Teardown already disposed the previous renderer. If anything remains, join safely.
+                if (_renderer != null)
+                {
+                    DisposeRendererSafe();
+                }
                 
                 if (_videoHwndHost != null)
                 {
                     _renderer = new D3D11VideoRenderer(_videoHwndHost.Handle, newDecoder);
+                    _renderer.StretchMode = _currentVideoStretch;
+                    if (_isEnhancedShaderEnabled)
+                        _renderer.EnableEnhancedShader(true);
+                    _renderer.ClearDisplay(); // black before first decoded frame
                     newDecoder.SetD3D11Device(_renderer.D3D11DevicePtr, _renderer.D3D11ContextPtr);
                 }
                 newDecoder.FrameDecoded += Decoder_FrameDecoded;
                 newDecoder.AudioDataAvailable += Decoder_AudioDataAvailable;
                 newDecoder.PositionChanged += Decoder_PositionChanged;
-                newDecoder.PlaybackFinished += Decoder_PlaybackFinished;
+                // Use captured-gen handler so that PlaybackFinished carries the generation of THIS
+                // playback. Rapid previous (or next) after sequential play would otherwise let stale
+                // finish from abandoned file pass the guard and start conflicting PlayFile.
+                int capturedGenForFinish = openGeneration;
+                Action finishHandler = () => Decoder_PlaybackFinishedCaptured(capturedGenForFinish);
+                newDecoder.PlaybackFinished += finishHandler;
+                _activePlaybackFinishedHandler = finishHandler;
                 newDecoder.RotationDetected += Decoder_RotationDetected;
                 newDecoder.SeekInitiated += Decoder_SeekInitiated;
                 newDecoder.SeekPerformed += Decoder_SeekPerformed;
@@ -1864,8 +2015,9 @@ namespace JonPlayer
 
                 if (_isClosing)
                 {
-                    DetachDecoderEvents(newDecoder);
-                    newDecoder.Dispose();
+                    AbortDecoderLoad(newDecoder);
+                    _currentPlaybackOpenGen = 0;
+                    CompleteOpenAttempt(openGeneration);
                     return;
                 }
 
@@ -1878,17 +2030,29 @@ namespace JonPlayer
 
                 if (openGeneration != Volatile.Read(ref _openGeneration))
                 {
-                    DetachDecoderEvents(newDecoder);
-                    newDecoder.Dispose();
+                    AbortDecoderLoad(newDecoder);
+                    _currentPlaybackOpenGen = 0;
+                    CompleteOpenAttempt(openGeneration);
                     return;
                 }
 
                 
                 _decoder = newDecoder;
+                _currentPlaybackOpenGen = openGeneration;
                 InitAudioPlayer();
+
+                if (_isClosing || openGeneration != Volatile.Read(ref _openGeneration))
+                {
+                    AbortDecoderLoad(newDecoder);
+                    _decoder = null;
+                    _currentPlaybackOpenGen = 0;
+                    CompleteOpenAttempt(openGeneration);
+                    return;
+                }
                 
                 if (!isUrl && _decoder.DurationSeconds > 10.0)
                 {
+                    SetVolumeSlider(_userPreferredVolume);
                     _ = RunRandomIntervalVolumeScanAsync(path, _decoder.DurationSeconds);
                 }
                 
@@ -1901,10 +2065,16 @@ namespace JonPlayer
                 });
                 
                 _renderer?.ResetPresentationPacing();
+                _renderer?.ClearDisplay();
+                try { _waveProvider?.ClearBuffer(); } catch { /* ignore */ }
                 _userWantsPlayback = true;
                 _decoder.Play();
+
+                double initMs = startRatio > 0.0 ? startRatio * (_decoder.DurationSeconds * 1000.0) : 0.0;
+                StartUiClock(initMs);
+                // WaveOut may start; decoder still suppresses PCM until first video frame is shown.
                 _waveOut?.Play();
-                
+
                 if (startRatio > 0.0 && !isUrl)
                 {
                     _decoder.Seek(startRatio);
@@ -1913,6 +2083,7 @@ namespace JonPlayer
                 Dispatcher.Invoke(() => {
                     _isSeeking = false;
                     _pendingSeekSubtitleMs = -1.0;
+                    _lastUserSeekTargetMs = -1.0;
                     _allowTimelineBackward = true;
                     _isUpdatingFromPlayer = true;
                     double sliderPos = startRatio * 1000.0;
@@ -2051,13 +2222,39 @@ namespace JonPlayer
                 }
 
                 UpdatePlayPauseUI(true);
+                UpdateWindowSizePresetUi();
+
+                // Final supersession check after the long post-Play UI setup window. If the user
+                // navigated away during Dispatcher.Invoke / subtitle / tag work, abandon this open
+                // so we do not leave a mismatched gen while claiming success.
+                if (_isClosing || openGeneration != Volatile.Read(ref _openGeneration))
+                {
+                    if (_decoder == newDecoder)
+                    {
+                        _decoder = null;
+                        _currentPlaybackOpenGen = 0;
+                        AbortDecoderLoad(newDecoder);
+                        newDecoder = null;
+                    }
+                    return;
+                }
             }
             catch (Exception ex)
             {
-                newDecoder?.Dispose();
+                if (newDecoder != null)
+                {
+                    AbortDecoderLoad(newDecoder);
+                    if (_decoder == newDecoder)
+                        _decoder = null;
+                }
+                else
+                {
+                    DisposeRendererSafe();
+                }
                 if (openGeneration == Volatile.Read(ref _openGeneration))
                 {
                     WpfMessageBox.Show($"파일을 열 수 없습니다.\n{ex.Message}", "JonPlayer", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    _pendingPlaylistTarget = null;
                 }
             }
             finally
@@ -2065,17 +2262,52 @@ namespace JonPlayer
                 if (openGeneration == Volatile.Read(ref _openGeneration))
                 {
                     StopStreamingLoadingBlink();
-                    _isOpeningFile = false;
+
+                    // Reset wall clock elapsed exactly when the file becomes ready (after decoder/renderer init).
+                    // This prevents any tiny advance that accumulated between StartUiClock and here
+                    // (updates were anyway blocked by _isOpeningFile). Especially relevant for
+                    // F4 HW<->SW reloads which go through PlayFile.
+                    if (_userWantsPlayback && _decoder != null)
+                    {
+                        _uiClock.Restart();
+                    }
                 }
+
+                // Always release our opening ownership (if we still hold it) and drain pending nav.
+                // Previously, a gen mismatch in finally left _isOpeningFile stuck true forever, so
+                // playlist auto-next / manual next only updated the highlight and never called PlayFile.
+                CompleteOpenAttempt(openGeneration);
             }
+        }
+
+        private static bool TryParseVolumeDetect(string stderr, out double meanDb, out double maxDb)
+        {
+            meanDb = -99.0;
+            maxDb = -99.0;
+
+            var meanMatch = System.Text.RegularExpressions.Regex.Match(stderr, @"mean_volume:\s*([-\d\.]+)\s*dB");
+            if (meanMatch.Success)
+            {
+                double.TryParse(meanMatch.Groups[1].Value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out meanDb);
+            }
+
+            var maxMatch = System.Text.RegularExpressions.Regex.Match(stderr, @"max_volume:\s*([-\d\.]+)\s*dB");
+            if (maxMatch.Success)
+            {
+                double.TryParse(maxMatch.Groups[1].Value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out maxDb);
+            }
+
+            return meanDb > -90.0 || maxDb > -90.0;
         }
 
         private async Task RunRandomIntervalVolumeScanAsync(string filePath, double durationSeconds)
         {
+            int scanGeneration = Volatile.Read(ref _openGeneration);
+
             try
             {
-                if (_audioEnhancer == null) return;
-                
+                if (_decoder == null || _isClosing) return;
+
                 string ffmpegPath = await YouTubeStreamingService.EnsureFFmpegCliAsync();
                 
                 int numSamples = 5;
@@ -2087,7 +2319,7 @@ namespace JonPlayer
                 }
 
                 var random = new Random();
-                var tasks = new System.Collections.Generic.List<Task<double>>();
+                var tasks = new System.Collections.Generic.List<Task<(double Mean, double Max)>>();
 
                 for (int i = 0; i < numSamples; i++)
                 {
@@ -2097,11 +2329,12 @@ namespace JonPlayer
                         startTime = random.NextDouble() * (durationSeconds - sampleDuration);
                     }
 
+                    double sampleStart = startTime;
                     tasks.Add(Task.Run(async () =>
                     {
                         using var process = new System.Diagnostics.Process();
                         process.StartInfo.FileName = ffmpegPath;
-                        process.StartInfo.Arguments = "-ss " + startTime.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + " -t " + sampleDuration.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + " -i \"" + filePath + "\" -vn -af volumedetect -f null -";
+                        process.StartInfo.Arguments = "-ss " + sampleStart.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + " -t " + sampleDuration.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + " -i \"" + filePath + "\" -vn -af volumedetect -f null -";
                         process.StartInfo.UseShellExecute = false;
                         process.StartInfo.RedirectStandardError = true;
                         process.StartInfo.CreateNoWindow = true;
@@ -2110,46 +2343,86 @@ namespace JonPlayer
                         string stderr = await process.StandardError.ReadToEndAsync();
                         await process.WaitForExitAsync();
 
-                        var match = System.Text.RegularExpressions.Regex.Match(stderr, @"max_volume:\s*([\-\d\.]+)\s*dB");
-                        if (match.Success && double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double maxVol))
-                        {
-                            return maxVol;
-                        }
-                        return -99.0;
+                        TryParseVolumeDetect(stderr, out double meanDb, out double maxDb);
+                        return (meanDb, maxDb);
                     }));
                 }
 
                 var results = await Task.WhenAll(tasks);
-                
-                double maxPeak = -99.0;
-                foreach (var res in results)
+
+                if (scanGeneration != Volatile.Read(ref _openGeneration) || _isClosing)
+                    return;
+
+                double meanSum = 0.0;
+                int meanCount = 0;
+                double worstMax = -99.0;
+
+                foreach (var (mean, max) in results)
                 {
-                    if (res > maxPeak) maxPeak = res;
-                }
-                
-                if (maxPeak > -90.0) 
-                {
-                    double targetPeak = -0.3;
-                    double gainDb = targetPeak - maxPeak;
-                    
-                    if (gainDb > 20.0) gainDb = 20.0;
-                    
-                    float multiplier = (float)Math.Pow(10, gainDb / 20.0);
-                    
-                    Dispatcher.Invoke(() =>
+                    if (mean > -90.0)
                     {
-                        if (_audioEnhancer != null)
-                        {
-                            _audioEnhancer.BaselineVolumeMultiplier = multiplier;
-                            Logger.Info($"[VolumeNormalizer] Max peak: {maxPeak:F1}dB. Set Baseline Gain to {gainDb:F1}dB (Multiplier: {multiplier:F2}x)");
-                        }
-                    });
+                        meanSum += mean;
+                        meanCount++;
+                    }
+                    if (max > worstMax) worstMax = max;
                 }
+
+                if (meanCount == 0) return;
+
+                double avgMean = meanSum / meanCount;
+                double gainDb = AutoVolumeTargetMeanDb - avgMean;
+
+                if (gainDb > 0.0 && worstMax + gainDb > AutoVolumePeakLimitDb)
+                    gainDb = Math.Max(0.0, AutoVolumePeakLimitDb - worstMax);
+
+                gainDb = Math.Clamp(gainDb, -AutoVolumeMaxGainDb, AutoVolumeMaxGainDb);
+
+                double detectedMean = avgMean;
+                double detectedMax = worstMax;
+                Dispatcher.Invoke(() =>
+                {
+                    if (scanGeneration != Volatile.Read(ref _openGeneration) || _isClosing) return;
+                    ApplyNormalizedVolume(gainDb, detectedMean, detectedMax);
+                });
             }
             catch (Exception ex)
             {
                 Logger.Error("Failed to run random interval volume scan", ex);
             }
+        }
+
+        private void SetVolumeSlider(int vol)
+        {
+            vol = (int)Math.Clamp(vol, 0, 100);
+
+            _isUpdatingFromPlayer = true;
+            if (SliderVolume != null) SliderVolume.Value = vol;
+            if (SliderVolumeFS != null) SliderVolumeFS.Value = vol;
+            _isUpdatingFromPlayer = false;
+
+            if (!_isMuted) UpdateMuteIcon(vol);
+            if (_waveOut != null) _waveOut.Volume = _isMuted ? 0 : (float)(vol / 100.0);
+        }
+
+        private void ApplyNormalizedVolume(double gainDb, double meanDb, double maxPeakDb)
+        {
+            _lastAutoGainDb = gainDb;
+            _lastDetectedMeanDb = meanDb;
+            if (_isMuted) return;
+
+            // 사용자 기준 볼륨(초기 50%) 중심으로 ±15% 범위 내 자동 조정.
+            double offset = Math.Clamp(
+                gainDb / AutoVolumeMaxGainDb * AutoVolumeMaxOffset,
+                -AutoVolumeMaxOffset,
+                AutoVolumeMaxOffset);
+            int center = _userPreferredVolume;
+            int minVol = Math.Max(0, center - AutoVolumeMaxOffset);
+            int maxVol = Math.Min(100, center + AutoVolumeMaxOffset);
+            int newVol = (int)Math.Clamp(Math.Round(center + offset), minVol, maxVol);
+
+            SetVolumeSlider(newVol);
+
+            Logger.Info($"[VolumeNormalizer] mean {meanDb:F1}dB / max {maxPeakDb:F1}dB → auto gain {gainDb:+0.0;-0.0;0.0}dB → slider {newVol}% (pref {center}% ±{AutoVolumeMaxOffset}%)");
         }
 
         private string GetNowPlayingDisplayName(string path)
@@ -2230,8 +2503,13 @@ namespace JonPlayer
             Interlocked.Increment(ref _streamingSeekGeneration);
             Interlocked.Increment(ref _subtitleLoadGeneration);
             _isOpeningFile = false;
+            Volatile.Write(ref _openingOwnedByGen, 0);
             _isSeeking = false;
             _pendingSeekSubtitleMs = -1.0;
+            _lastUserSeekTargetMs = -1.0;
+            _currentPlaybackOpenGen = 0;
+            _activePlaybackFinishedHandler = null;
+            _pendingPlaylistTarget = null;
             StopStreamingLoadingBlink();
             _userWantsPlayback = false;
 
@@ -2239,7 +2517,9 @@ namespace JonPlayer
             _decoder = null;
             if (oldDecoder != null)
             {
+                oldDecoder.Stop();
                 DetachDecoderEvents(oldDecoder);
+                DisposeRendererSafe();
                 DisposeDecoderInBackground(oldDecoder);
             }
             
@@ -2267,6 +2547,8 @@ namespace JonPlayer
             _isUpdatingFromPlayer = false;
             if (TxtCurrentTime != null) TxtCurrentTime.Text = "00:00:00";
             if (TxtCurrentTimeFS != null) TxtCurrentTimeFS.Text = "00:00:00";
+            PauseUiClock();
+            _uiClockBaseMs = 0;
             SetRandomVibe();
             Title = "JonPlayer";
         }
@@ -2294,252 +2576,14 @@ namespace JonPlayer
             if (_isShuffle) _playedIndices.Clear();
         }
 
-        private void InitAudioPlayer()
-        {
-            if (_waveOut != null)
-            {
-                _waveOut.Stop();
-                _waveOut.Dispose();
-                _waveOut = null;
-            }
-
-            if (_decoder != null && _decoder.AudioSampleRate > 0)
-            {
-                var format = new WaveFormat(_decoder.AudioSampleRate, 16, _decoder.AudioChannels);
-                _waveProvider = new BufferedWaveProvider(format)
-                {
-                    BufferDuration = TimeSpan.FromSeconds(5),
-                    DiscardOnBufferOverflow = true
-                };
-
-                var sampleProvider = _waveProvider.ToSampleProvider();
-                // We ensure it is stereo (if mono, ToStereo() must be called, but assuming 2 channels as per current pipeline)
-                if (sampleProvider.WaveFormat.Channels == 1) sampleProvider = sampleProvider.ToStereo();
-                
-                _audioEnhancer = new AudioEnhancerProvider(sampleProvider)
-                {
-                    IsEnhancerEnabled = BtnBass.Tag?.ToString() == "On"
-                };
-
-                _waveOut = new WaveOutEvent
-                {
-                    // 40ms is too aggressive for this decoder pipeline and can cause underruns
-                    // that sound like crackling/static when packets arrive unevenly.
-                    DesiredLatency = 160,
-                    NumberOfBuffers = 3
-                };
-                _waveOut.Init(_audioEnhancer);
-                if (SliderVolume != null)
-                {
-                _waveOut.Volume = _isMuted ? 0 : (float)(SliderVolume.Value / 100.0);
-                }
-            }
-        }
-
-        private void Decoder_AudioDataAvailable(byte[] buffer, int length)
-        {
-            // Check both decoder state and our intent. This prevents data from being added
-            // right after Pause() or before Resume() is fully processed (race with decoder thread).
-            if (_decoder == null || _decoder.IsPaused || !_userWantsPlayback)
-            {
-                return;
-            }
-            Volatile.Write(ref _lastAudioTicks, DateTime.UtcNow.Ticks);
-            if (_waveProvider != null && _waveProvider.BufferedDuration.TotalSeconds < 4.5)
-            {
-                _waveProvider.AddSamples(buffer, 0, length);
-            }
-        }
-
-        private static void PauseLog(string msg)
-        {
-            try
-            {
-                string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "pause_debug.log");
-                File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {msg}{Environment.NewLine}");
-            }
-            catch { }
-        }
-
-        private bool TryConsumePlayPauseToggle(string source)
-        {
-            long now = DateTime.UtcNow.Ticks;
-            long last = Volatile.Read(ref _lastPlayPauseToggleUtcTicks);
-            if (last > 0 && (now - last) / TimeSpan.TicksPerMillisecond < PlayPauseToggleDebounceMs)
-            {
-                PauseLog($"[DEBOUNCE] source={source} ignored");
-                return false;
-            }
-            Volatile.Write(ref _lastPlayPauseToggleUtcTicks, now);
-            return true;
-        }
-
-        private void UserPausePlayback(string source = "internal")
-        {
-            if (_decoder == null || !_decoder.IsRunning || _decoder.IsPaused)
-            {
-                return;
-            }
-            PauseLog($"[PAUSE] source={source}");
-            _userWantsPlayback = false;
-            _decoder.Pause();
-            _waveOut?.Pause();
-
-            // Do not clear the provider on a normal pause. For audio-only files, clearing the
-            // buffer can make the decoder's EOF/drained-buffer check look like playback ended.
-            // Seek/stop paths still clear the buffer explicitly.
-
-            UpdatePlayPauseUI(false);
-        }
-
-        private void UserResumePlayback(string source = "internal")
-        {
-            if (_decoder == null || !_decoder.IsRunning || _decoder.IsPlaying)
-            {
-                return;
-            }
-            PauseLog($"[RESUME] source={source}");
-            _userWantsPlayback = true;
-            _decoder.Play();
-            _waveOut?.Play();
-            UpdatePlayPauseUI(true);
-        }
-
-        private void TogglePlayPause(string source = "unknown")
-        {
-            if (!TryConsumePlayPauseToggle(source))
-            {
-                return;
-            }
-
-            if (_decoder == null || !_decoder.IsRunning)
-            {
-                if (!string.IsNullOrEmpty(_currentFilePath))
-                {
-                    double ratio = 0.0;
-                    if (SliderTimeline != null && SliderTimeline.Maximum > 0)
-                    {
-                        ratio = SliderTimeline.Value / SliderTimeline.Maximum;
-                    }
-                    PlayFile(_currentFilePath, ratio);
-                }
-                return;
-            }
-
-            if (_decoder.IsPlaying)
-            {
-                UserPausePlayback(source);
-            }
-            else
-            {
-                UserResumePlayback(source);
-            }
-        }
-
-        private void UpdatePlayPauseUI(bool isPlaying)
-        {
-            if (isPlaying && AudioUI != null && AudioUI.Visibility == Visibility.Visible)
-            {
-                if (!_notesTimer.IsEnabled) _notesTimer.Start();
-            }
-            else
-            {
-                if (_notesTimer.IsEnabled) _notesTimer.Stop();
-                FadeOutAllNotes();
-            }
-
-            var geom = (Geometry)FindResource(isPlaying ? "PauseIcon" : "PlayIcon");
-            if (PlayPauseIconPath != null)
-            {
-                PlayPauseIconPath.Data = geom;
-                PlayPauseIconPath.Margin = isPlaying ? new Thickness(0) : new Thickness(2,0,0,0);
-            }
-            if (PlayPauseIconPathFS != null)
-            {
-                PlayPauseIconPathFS.Data = geom;
-                PlayPauseIconPathFS.Margin = isPlaying ? new Thickness(0) : new Thickness(2,0,0,0);
-            }
-            if (PlayPauseIconPathPip != null)
-            {
-                PlayPauseIconPathPip.Data = geom;
-                PlayPauseIconPathPip.Margin = isPlaying ? new Thickness(0) : new Thickness(2,0,0,0);
-            }
-
-            BtnPlayPause.ToolTip = isPlaying ? "Pause (Space)" : "Play (Space)";
-            if (BtnPlayPauseFS != null) BtnPlayPauseFS.ToolTip = isPlaying ? "Pause" : "Play";
-            if (BtnPlayPausePip != null) BtnPlayPausePip.ToolTip = isPlaying ? "Pause" : "Play";
-        }
-
-        private void NotesTimer_Tick(object? sender, EventArgs e)
-        {
-            if (AudioNotesCanvas == null || (AudioNotesCanvas.Visibility != Visibility.Visible && AudioUI.Visibility != Visibility.Visible)) return;
-            if (_decoder == null || !_decoder.IsPlaying) return;
-
-            var note = new TextBlock
-            {
-                Text = _musicNotes[_notesRandom.Next(_musicNotes.Length)],
-                Foreground = new SolidColorBrush(Color.FromArgb((byte)_notesRandom.Next(100, 200), (byte)_notesRandom.Next(200, 255), (byte)_notesRandom.Next(200, 255), 255)),
-                FontSize = _notesRandom.Next(24, 48),
-                RenderTransformOrigin = new Point(0.5, 0.5),
-                Opacity = 0
-            };
-
-            var transform = new TransformGroup();
-            var translate = new TranslateTransform();
-            var rotate = new RotateTransform();
-            transform.Children.Add(translate);
-            transform.Children.Add(rotate);
-            note.RenderTransform = transform;
-
-            AudioNotesCanvas.Children.Add(note);
-
-            double startX = AudioUI.ActualWidth / 2 + _notesRandom.Next(-300, 300);
-            double startY = AudioUI.ActualHeight / 2 + 100 + _notesRandom.Next(-50, 50);
-
-            Canvas.SetLeft(note, startX);
-            Canvas.SetTop(note, startY);
-
-            var duration = TimeSpan.FromSeconds(_notesRandom.Next(4, 7));
-
-            var opacityAnim = new DoubleAnimationUsingKeyFrames();
-            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(0)));
-            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0.8, KeyTime.FromPercent(0.2)));
-            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0.8, KeyTime.FromPercent(0.6)));
-            opacityAnim.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(1.0)));
-            opacityAnim.Duration = duration;
-
-            var moveUpAnim = new DoubleAnimation(startY, startY - _notesRandom.Next(150, 300), new Duration(duration));
-            var swayAnim = new DoubleAnimation(-20, 20, new Duration(TimeSpan.FromSeconds(1.5))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever };
-            var rotateAnim = new DoubleAnimation(-15, 15, new Duration(TimeSpan.FromSeconds(2))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever };
-
-            note.BeginAnimation(UIElement.OpacityProperty, opacityAnim);
-            note.BeginAnimation(Canvas.TopProperty, moveUpAnim);
-            translate.BeginAnimation(TranslateTransform.XProperty, swayAnim);
-            rotate.BeginAnimation(RotateTransform.AngleProperty, rotateAnim);
-
-            var removeTimer = new DispatcherTimer { Interval = duration };
-            removeTimer.Tick += (s, ev) =>
-            {
-                removeTimer.Stop();
-                AudioNotesCanvas.Children.Remove(note);
-            };
-            removeTimer.Start();
-        }
-
-        private void FadeOutAllNotes()
-        {
-            if (AudioNotesCanvas == null) return;
-            foreach (UIElement child in AudioNotesCanvas.Children)
-            {
-                var currentOpacity = child.Opacity;
-                var fadeOut = new DoubleAnimation(currentOpacity, 0, new Duration(TimeSpan.FromSeconds(1)));
-                child.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-            }
-        }
+        // Centralized guard used by seek paths to avoid operating on decoder during
+        // mode switch (F4) or file open. Rapid seeks + HW<->SW switches were causing
+        // races with decoder/renderer recreation leading to crashes.
+        private bool IsSeekBlocked() => _isOpeningFile || _decoder == null || !_decoder.IsRunning;
 
         private void SeekRelative(double offsetSeconds)
         {
-            if (_decoder == null || !_decoder.IsRunning) return;
+            if (IsSeekBlocked()) return;
             
             double totalSeconds = _decoder.DurationSeconds;
             if (totalSeconds <= 0) return;
@@ -2549,12 +2593,6 @@ namespace JonPlayer
             double targetSeconds = Math.Clamp(currentSeconds + offsetSeconds, 0, totalSeconds);
             double targetRatio = targetSeconds / totalSeconds;
             _pendingSeekSubtitleMs = targetSeconds * 1000.0;
-            
-            _isUpdatingFromPlayer = true;
-            SliderTimeline.Value = targetRatio * 1000.0;
-            if (SliderTimelineFS != null) SliderTimelineFS.Value = targetRatio * 1000.0;
-            _isUpdatingFromPlayer = false;
-
             _isSeeking = true;
             UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
             if (BeginStreamingSeek(targetRatio)) return;
@@ -2640,6 +2678,16 @@ namespace JonPlayer
 
         private void UpdateSpeedUI(double speed)
         {
+            // Rebase UI clock at current displayed time so speed change doesn't jump the bar
+            if (_uiClock.IsRunning || _userWantsPlayback)
+            {
+                SetUiClockSpeed(speed);
+            }
+            else
+            {
+                _uiClockSpeed = speed;
+            }
+
             _currentSpeed = speed;
             if (_decoder != null) 
             {
@@ -2901,6 +2949,8 @@ namespace JonPlayer
             }
         }
 
+        private void BtnHq_Click(object sender, RoutedEventArgs e) => ToggleEnhancedShader();
+
         private async void BtnWhisper_Click(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrEmpty(_currentFilePath)) {
@@ -3081,33 +3131,20 @@ namespace JonPlayer
             }
         }
 
-        private bool _wasPlayingBeforeDrag = false;
-
         private void SliderTimeline_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
         {
+            if (IsSeekBlocked()) return;
             _isUserDraggingSlider = true;
-            _isSeeking = true;
             if (_decoder != null && _decoder.DurationSeconds > 0)
             {
                 _pendingSeekSubtitleMs = (SliderTimeline.Value / 1000.0) * _decoder.DurationSeconds * 1000.0;
-            }
-
-            if (_decoder != null && _decoder.IsPlaying)
-            {
-                _wasPlayingBeforeDrag = true;
-                UserPausePlayback("timeline-drag");
-            }
-            else
-            {
-                _wasPlayingBeforeDrag = false;
             }
         }
 
         private void SliderTimeline_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
         {
             _suppressTimelineSeek = true;
-            _isUserDraggingSlider = false;
-            
+
             Slider? targetSlider = sender as Slider;
             if (targetSlider == null && e.OriginalSource is System.Windows.Controls.Primitives.Thumb thumb)
             {
@@ -3116,13 +3153,11 @@ namespace JonPlayer
             if (targetSlider == null) targetSlider = SliderTimeline;
             
             DoSeek(targetSlider.Value);
+            _isUserDraggingSlider = false;
+            _pendingSeekSubtitleMs = -1.0;
+            _lastUserSeekTargetMs = -1.0;
 
-            if (_wasPlayingBeforeDrag && _decoder != null)
-            {
-                UserResumePlayback("timeline-drag");
-            }
-
-            Dispatcher.BeginInvoke(new Action(() => _suppressTimelineSeek = false), DispatcherPriority.Background);
+            Dispatcher.BeginInvoke(new Action(() => _suppressTimelineSeek = false), DispatcherPriority.ApplicationIdle);
         }
 
         private void Decoder_RotationDetected(double rotation)
@@ -3163,7 +3198,7 @@ namespace JonPlayer
                     UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
                 }
             }
-            else if (!_suppressTimelineSeek)
+            else if (!_suppressTimelineSeek && !IsSeekBlocked())
             {
                 DoSeek(e.NewValue);
             }
@@ -3180,16 +3215,37 @@ namespace JonPlayer
 
         private void DoSeek(double sliderValue)
         {
-            if (_decoder == null || !_decoder.IsRunning)
+            // === USER SEEK UX CONTRACT (protected logic) ===
+            // When user clicks/drags to a position:
+            // 1. Immediately update UI clock + slider to that exact target (optimistic, responsive bar).
+            // 2. Record _lastUserSeekTargetMs so SeekPerformed knows not to snap back to keyframe/early land.
+            // 3. Issue decoder.Seek (which may land on keyframe for video).
+            // 4. On land, only correct UI if landed significantly later (or huge error). Never jump bar backwards.
+            // This is the core of "bar shows what user asked, content catches up from nearest keyframe".
+            // DO NOT break this without updating all call sites and comments.
+            // Related optimizations: small-seek queue preserve, post-seek reduced prebuffer, seek gen cancel.
+            if (IsSeekBlocked())
             {
                 _isSeeking = false;
                 _pendingSeekSubtitleMs = -1.0;
+                _lastUserSeekTargetMs = -1.0;
                 return;
             }
             _isSeeking = true;
             double targetRatio = sliderValue / 1000.0;
-            _pendingSeekSubtitleMs = targetRatio * _decoder.DurationSeconds * 1000.0;
-            UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
+            double durationMs = _decoder.DurationSeconds * 1000.0;
+            double targetMs = targetRatio * durationMs;
+            _pendingSeekSubtitleMs = targetMs;
+            _lastUserSeekTargetMs = targetMs;
+            UpdateSubtitleAt((int)targetMs);
+
+            _isUpdatingFromPlayer = true;
+            SyncUiClock(targetMs);
+            double targetSliderVal = targetRatio * SliderTimeline.Maximum;
+            SliderTimeline.Value = targetSliderVal;
+            if (SliderTimelineFS != null) SliderTimelineFS.Value = targetSliderVal;
+            _isUpdatingFromPlayer = false;
+
             if (BeginStreamingSeek(targetRatio)) return;
 
             _decoder.Seek(targetRatio);
@@ -3306,35 +3362,75 @@ namespace JonPlayer
 
         private void Decoder_SeekInitiated()
         {
+            _waveOut?.Stop();
             _waveProvider?.ClearBuffer();
+            _renderer?.PrepareForSeek();
             _renderer?.ResetPresentationPacing();
         }
 
         private void Decoder_SeekPerformed()
         {
+            // === LAND HANDLING (must respect user target) ===
+            // See DoSeek contract above. Subtitles use actual media time.
+            // Timeline/bar prefers user target unless landed is much later.
             Dispatcher.BeginInvoke(() =>
             {
                 _allowTimelineBackward = true;
                 _isSeeking = false;
+                _pendingSeekSubtitleMs = -1.0;
                 _renderer?.ResetPresentationPacing();
-                if (_decoder?.ConsumePendingAudioBufferClear() == true)
+                _waveProvider?.ClearBuffer();
+                _decoder?.ReleasePostSeekPlayback();
+
+                if (_decoder != null)
                 {
-                    _waveProvider?.ClearBuffer();
+                    int actualMs = (int)_decoder.GetCurrentTimeMs();
+                    UpdateSubtitleAt(actualMs);
                 }
-                    if (_pendingSeekSubtitleMs >= 0.0)
+
+                double landedMs = _decoder != null ? _decoder.GetCurrentTimeMs() : 0;
+
+                if (_decoder != null)
+                {
+                    // For user-initiated seeks, strongly prefer keeping the bar at the exact position the user clicked.
+                    // Only snap if the landed position is significantly *later* than requested (or huge error).
+                    // This matches how most commercial players handle click-to-seek UX: the timeline reflects user intent.
+                    bool shouldSnap = _lastUserSeekTargetMs < 0 
+                        || (landedMs > _lastUserSeekTargetMs + 1500);   // snap only if landed much later
+                    if (shouldSnap)
                     {
-                        UpdateSubtitleAt((int)_pendingSeekSubtitleMs);
-                        _pendingSeekSubtitleMs = -1.0;
+                        SyncUiClock(landedMs);
+                        _isUpdatingFromPlayer = true;
+                        double durationMs = _decoder.DurationSeconds * 1000.0;
+                        double sliderVal = durationMs > 0 ? landedMs / durationMs * SliderTimeline.Maximum : 0;
+                        if (SliderTimeline != null) SliderTimeline.Value = sliderVal;
+                        if (SliderTimelineFS != null) SliderTimelineFS.Value = sliderVal;
+                        _isUpdatingFromPlayer = false;
                     }
+                    // else keep user target. The actual video will start from the closest possible (after keyframe forward-decode).
+                }
+                _lastUserSeekTargetMs = -1;
+
                 UpdateTimelineFromPlayback();
+
+                if (_userWantsPlayback && _waveOut != null)
+                {
+                    if (!_isMuted)
+                        _waveOut.Volume = (float)(SliderVolume.Value / 100.0);
+                    _waveOut.Play();
+                }
             });
         }
 
         private void SliderVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
+            int vol = (int)e.NewValue;
+
+            if (!_isUpdatingFromPlayer && !_isMuted)
+                _userPreferredVolume = vol;
+
             if (_isUpdatingFromPlayer) return;
 
-            int vol = (int)e.NewValue;
             _isUpdatingFromPlayer = true;
             if (sender == SliderVolume && SliderVolumeFS != null) SliderVolumeFS.Value = vol;
             else if (sender == SliderVolumeFS && SliderVolume != null) SliderVolume.Value = vol;
@@ -3457,23 +3553,45 @@ namespace JonPlayer
         }
 
         private bool _isEnhancedShaderEnabled = false;
+
         private void ToggleEnhancedShader()
         {
             _isEnhancedShaderEnabled = !_isEnhancedShaderEnabled;
+            ApplyEnhancedShaderState();
+            ShowToast($"HQ+ Enhanced: {(_isEnhancedShaderEnabled ? "ON" : "OFF")}");
+        }
+
+        /// <summary>
+        /// Push HQ+ (enhanced HLSL) state to the live renderer and both control-bar toggles.
+        /// Safe to call after renderer recreate (PlayFile / HW toggle).
+        /// </summary>
+        private void ApplyEnhancedShaderState()
+        {
             if (_renderer != null)
-            {
                 _renderer.EnableEnhancedShader(_isEnhancedShaderEnabled);
-                ShowToast($"Enhanced Shader: {(_isEnhancedShaderEnabled ? "ON" : "OFF")}");
-            }
+
+            object? tag = _isEnhancedShaderEnabled ? "On" : null;
+            if (BtnHq != null) BtnHq.Tag = tag;
+            if (BtnHqFS != null) BtnHqFS.Tag = tag;
         }
 
         private void ToggleHwAccel()
         {
+            if (_isOpeningFile) return;
+
             _forceSoftwareDecode = !_forceSoftwareDecode;
             FFmpegMediaDecoder.EnableHwAccel = !_forceSoftwareDecode;
 
             string mode = _forceSoftwareDecode ? "SW (CPU)" : "HW (D3D11VA)";
-            ShowToast($"Decode: {mode} (F4)");
+            if (_forceSoftwareDecode && _decoder != null && _decoder.HasVideo
+                && _decoder.Width * _decoder.Height > 1920 * 1080)
+            {
+                ShowToast($"Decode: {mode} — 4K SW는 HW보다 느림 (F4)");
+            }
+            else
+            {
+                ShowToast($"Decode: {mode} (F4)");
+            }
 
             // Reload current *video* file to apply new decode mode (preserves approx position).
             // Audio-only files don't use HW path, so no reload needed.
@@ -3533,9 +3651,8 @@ namespace JonPlayer
             this.Left = screen.WorkingArea.Right - this.Width - 20;
             this.Top = screen.WorkingArea.Bottom - this.Height - 20;
 
-            if (BtnPip != null) BtnPip.ToolTip = "Exit PIP Mode (P)";
+            if (BtnPipOverlay != null) BtnPipOverlay.ToolTip = "Exit PIP Mode (P)";
             SetPipHoverOverlayVisible(MainGrid.IsMouseOver);
-            if (PipTopBar != null) PipTopBar.Visibility = Visibility.Visible;
 
             // sync pip mute icon
             int volForIcon = _isMuted ? 0 : (int)(SliderVolume?.Value ?? 50);
@@ -3567,6 +3684,9 @@ namespace JonPlayer
             if (BtnPlayPausePip != null) BtnPlayPausePip.Visibility = Visibility.Collapsed;
             if (PipTopBar != null) PipTopBar.Visibility = Visibility.Collapsed;
             if (PipBottomBar != null) PipBottomBar.Visibility = Visibility.Collapsed;
+            if (BtnMutePip != null) BtnMutePip.Visibility = Visibility.Collapsed;
+            if (BtnPipOverlay != null) BtnPipOverlay.Visibility = Visibility.Collapsed;
+
             RestoreNormalPlayerLayout();
 
             if (_overlayWindow != null) _overlayWindow.IsHitTestVisible = true;
@@ -3581,8 +3701,14 @@ namespace JonPlayer
             RowTitleBar.Height = new GridLength(0);
             RowTimeline.Height = new GridLength(0);
             RowControls.Height = new GridLength(0);
-            if (BtnPlayPausePip != null) BtnPlayPausePip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+
+            // Top controls (X , mute, pip icon) and bottom only appear when mouse is near / hovering
+            if (PipTopBar != null) PipTopBar.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (BtnMutePip != null) BtnMutePip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (BtnPipOverlay != null) BtnPipOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
             if (PipBottomBar != null) PipBottomBar.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (BtnPlayPausePip != null) BtnPlayPausePip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+
             ApplyPipOverlayLayout(visible);
             MainGrid.UpdateLayout();
             SyncOverlayWindowToMainWindow();
@@ -3692,6 +3818,10 @@ namespace JonPlayer
         private bool _isFitScreen = false;
         private Rect _backupNormalBounds;
 
+        // Current video stretch/zoom mode. Applied to D3D11 renderer (real output) and kept for WPF fallbacks.
+        // Z key cycles: Uniform (원본 비율 + 여백) -> UniformToFill (가득 채우기/자르기) -> Fill (강제 늘림) -> Uniform
+        private System.Windows.Media.Stretch _currentVideoStretch = System.Windows.Media.Stretch.Uniform;
+
         private async void BtnTranslate_Click(object sender, RoutedEventArgs e)
         {
             _isTranslationEnabled = !_isTranslationEnabled;
@@ -3777,48 +3907,193 @@ namespace JonPlayer
             else
             {
                 _backupNormalBounds = new Rect(this.Left, this.Top, this.Width, this.Height);
-                var screen = System.Windows.Forms.Screen.FromHandle(new System.Windows.Interop.WindowInteropHelper(this).Handle);
-                
-                var source = PresentationSource.FromVisual(this);
-                if (source != null && source.CompositionTarget != null)
-                {
-                    var transform = source.CompositionTarget.TransformFromDevice;
-                    var tl = transform.Transform(new Point(screen.WorkingArea.Left, screen.WorkingArea.Top));
-                    var br = transform.Transform(new Point(screen.WorkingArea.Right, screen.WorkingArea.Bottom));
-                    var logicalWorkingArea = new Rect(tl, br);
-                    
-                    this.Left = logicalWorkingArea.Left;
-                    this.Top = logicalWorkingArea.Top;
-                    this.Width = logicalWorkingArea.Width;
-                    this.Height = logicalWorkingArea.Height;
-                }
-                else
-                {
-                    this.Left = screen.WorkingArea.Left;
-                    this.Top = screen.WorkingArea.Top;
-                    this.Width = screen.WorkingArea.Width;
-                    this.Height = screen.WorkingArea.Height;
-                }
+                var logicalWorkingArea = GetCurrentScreenWorkingAreaLogical();
+                this.Left = logicalWorkingArea.Left;
+                this.Top = logicalWorkingArea.Top;
+                this.Width = logicalWorkingArea.Width;
+                this.Height = logicalWorkingArea.Height;
                 _isFitScreen = true;
             }
         }
 
+        /// <summary>
+        /// Working area of the monitor that currently contains this window, in WPF DIPs.
+        /// </summary>
+        private Rect GetCurrentScreenWorkingAreaLogical()
+        {
+            var screen = System.Windows.Forms.Screen.FromHandle(
+                new System.Windows.Interop.WindowInteropHelper(this).Handle);
+
+            var source = PresentationSource.FromVisual(this);
+            if (source?.CompositionTarget != null)
+            {
+                var transform = source.CompositionTarget.TransformFromDevice;
+                var tl = transform.Transform(new Point(screen.WorkingArea.Left, screen.WorkingArea.Top));
+                var br = transform.Transform(new Point(screen.WorkingArea.Right, screen.WorkingArea.Bottom));
+                return new Rect(tl, br);
+            }
+
+            return new Rect(
+                screen.WorkingArea.Left,
+                screen.WorkingArea.Top,
+                screen.WorkingArea.Width,
+                screen.WorkingArea.Height);
+        }
+
+        /// <summary>Chrome height added on top of scaled video height (title + timeline + controls).</summary>
+        private const double WindowSizePresetChromeHeight = 60;
+
+        /// <summary>
+        /// Target client size for a video-relative window preset (50% / 100% / 200%).
+        /// Returns false when there is no active video size to base the preset on.
+        /// </summary>
+        private bool TryGetWindowSizePreset(double scale, out double width, out double height)
+        {
+            width = 0;
+            height = 0;
+
+            if (_isPipMode)
+            {
+                width = 400 * scale;
+                height = 225 * scale;
+                return true;
+            }
+
+            if (_decoder != null && _decoder.Width > 0 && _decoder.Height > 0)
+            {
+                width = _decoder.Width * scale;
+                height = _decoder.Height * scale + WindowSizePresetChromeHeight;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Whether a size preset fits entirely inside the current monitor working area.
+        /// Large videos often only allow 50% (or none) on typical screens.
+        /// </summary>
+        private bool CanFitWindowSizePreset(double scale)
+        {
+            if (!TryGetWindowSizePreset(scale, out double width, out double height))
+                return false;
+
+            var wa = GetCurrentScreenWorkingAreaLogical();
+            // 1 DIP tolerance for float / DPI rounding
+            return width <= wa.Width + 1.0 && height <= wa.Height + 1.0;
+        }
+
+        /// <summary>
+        /// Dim unavailable preset key badges and rewrite the F1 help line so only
+        /// screen-fitting scales look / act enabled.
+        /// </summary>
+        private void UpdateWindowSizePresetUi()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(UpdateWindowSizePresetUi));
+                return;
+            }
+
+            bool hasVideo = !_isPipMode
+                && _decoder != null
+                && _decoder.Width > 0
+                && _decoder.Height > 0;
+
+            // No media: show full legend as documentation, all badges full opacity.
+            bool can50 = !hasVideo || CanFitWindowSizePreset(0.5);
+            bool can100 = !hasVideo || CanFitWindowSizePreset(1.0);
+            bool can200 = !hasVideo || CanFitWindowSizePreset(2.0);
+
+            if (BadgeSize50 != null) BadgeSize50.Opacity = can50 ? 1.0 : 0.32;
+            if (BadgeSize100 != null) BadgeSize100.Opacity = can100 ? 1.0 : 0.32;
+            if (BadgeSize200 != null) BadgeSize200.Opacity = can200 ? 1.0 : 0.32;
+
+            if (TxtWindowSizePresets == null) return;
+
+            if (!hasVideo)
+            {
+                TxtWindowSizePresets.Text = "창 크기 50% / 100% / 200% (현재 화면 기준)";
+                TxtWindowSizePresets.Opacity = 1.0;
+                return;
+            }
+
+            if (!can50 && !can100 && !can200)
+            {
+                TxtWindowSizePresets.Text = "창 크기 프리셋 없음 (영상 > 현재 화면)";
+                TxtWindowSizePresets.Opacity = 0.65;
+                return;
+            }
+
+            if (can50 && can100 && can200)
+            {
+                TxtWindowSizePresets.Text = "창 크기 50% / 100% / 200%";
+                TxtWindowSizePresets.Opacity = 1.0;
+                return;
+            }
+
+            // Only list scales that fit the current monitor (e.g. large video → "50%" only).
+            var available = new System.Text.StringBuilder("창 크기 ");
+            bool first = true;
+            if (can50) { available.Append("50%"); first = false; }
+            if (can100) { if (!first) available.Append(" / "); available.Append("100%"); first = false; }
+            if (can200) { if (!first) available.Append(" / "); available.Append("200%"); }
+            available.Append(" (현재 화면 기준)");
+            TxtWindowSizePresets.Text = available.ToString();
+            TxtWindowSizePresets.Opacity = 1.0;
+        }
+
+        /// <summary>
+        /// Apply a video-relative window size preset if it fits the current screen.
+        /// Returns true when the window was resized; false when blocked (toast already shown).
+        /// </summary>
+        private bool TryApplyWindowSizePreset(double scale)
+        {
+            if (!TryGetWindowSizePreset(scale, out double width, out double height))
+            {
+                ShowToast("재생 중인 영상이 없습니다");
+                return false;
+            }
+
+            if (!CanFitWindowSizePreset(scale))
+            {
+                int pct = (int)Math.Round(scale * 100);
+                ShowToast($"창 크기 {pct}%: 현재 화면에 맞지 않음");
+                return false;
+            }
+
+            ResizeScreenTo(width, height);
+            return true;
+        }
+
         private void ResizeScreen(double scale)
+        {
+            TryApplyWindowSizePreset(scale);
+        }
+
+        private void ResizeScreenTo(double width, double height)
         {
             if (_isPipMode)
             {
-                this.Width = 400 * scale;
-                this.Height = 225 * scale;
+                this.Width = width;
+                this.Height = height;
                 return;
             }
+
             if (_isFullscreen) ExitFullscreen();
             if (this.WindowState == WindowState.Maximized) this.WindowState = WindowState.Normal;
-            
-            if (_decoder != null && _decoder.Width > 0 && _decoder.Height > 0)
-            {
-                this.Width = _decoder.Width * scale;
-                this.Height = _decoder.Height * scale + 60; // add some height for the control bar
-            }
+
+            this.Width = width;
+            this.Height = height;
+
+            // Keep the resized window fully on the current monitor when possible.
+            var wa = GetCurrentScreenWorkingAreaLogical();
+            if (this.Left + width > wa.Right)
+                this.Left = Math.Max(wa.Left, wa.Right - width);
+            if (this.Top + height > wa.Bottom)
+                this.Top = Math.Max(wa.Top, wa.Bottom - height);
+            if (this.Left < wa.Left) this.Left = wa.Left;
+            if (this.Top < wa.Top) this.Top = wa.Top;
         }
 
         private void ShowToast(string message)
@@ -3905,14 +4180,9 @@ namespace JonPlayer
                 
                 await Task.Delay(50);
                 
-                _decoder.Stop();
-                _decoder.Dispose();
+                var decoder = _decoder;
                 _decoder = null;
-            }
-            if (_renderer != null)
-            {
-                _renderer.Dispose();
-                _renderer = null;
+                await TeardownActivePlaybackAsync(decoder);
             }
             if (VideoElement != null) VideoElement.Source = null;
             if (VideoViewbox != null) VideoViewbox.Visibility = Visibility.Collapsed;
@@ -3923,6 +4193,12 @@ namespace JonPlayer
             _currentFilePath = null;
             this.Title = "JonPlayer";
             TxtNowPlaying.Text = "Pick Your Vibe";
+            _currentPlaybackOpenGen = 0;
+            _activePlaybackFinishedHandler = null;
+            _pendingPlaylistTarget = null;
+            _isOpeningFile = false;
+            Volatile.Write(ref _openingOwnedByGen, 0);
+            UpdateWindowSizePresetUi();
             
             TxtCurrentTime.Text = "00:00:00";
             TxtTotalTime.Text = "00:00:00";
@@ -4085,6 +4361,10 @@ namespace JonPlayer
             if (e.Handled) return;
             if (e.OriginalSource is WpfTextBox || e.OriginalSource is WpfComboBox) return;
 
+            // Extra guard using current focus (in case OriginalSource check misses child windows/dialogs)
+            var focused = System.Windows.Input.Keyboard.FocusedElement;
+            if (focused is WpfTextBox || focused is WpfComboBox) return;
+
             bool isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
             bool isShift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
 
@@ -4093,7 +4373,15 @@ namespace JonPlayer
             switch (actualKey)
             {
                 case Key.F1:
-                    ShortcutsOverlay.Visibility = ShortcutsOverlay.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+                    if (ShortcutsOverlay.Visibility != Visibility.Visible)
+                    {
+                        UpdateWindowSizePresetUi();
+                        ShortcutsOverlay.Visibility = Visibility.Visible;
+                    }
+                    else
+                    {
+                        ShortcutsOverlay.Visibility = Visibility.Collapsed;
+                    }
                     e.Handled = true; break;
 
                 case Key.Space:
@@ -4105,12 +4393,12 @@ namespace JonPlayer
                     break;
                 case Key.Left: 
                     if (isCtrl) SeekRelative(-30);
-                    else SeekRelative(-5); 
+                    else SeekRelative(-10); 
                     e.Handled = true; break;
                     
                 case Key.Right: 
                     if (isCtrl) SeekRelative(30);
-                    else SeekRelative(5); 
+                    else SeekRelative(10); 
                     e.Handled = true; break;
                     
                 case Key.Up: 
@@ -4228,9 +4516,8 @@ namespace JonPlayer
                     {
                         if (ListPlaylist.SelectedItem is PlaylistItem item)
                         {
-                            PlayFile(item.Path);
-                            _playlistIndex = _playlist.IndexOf(item);
-                            UpdateNowPlayingHighlight();
+                            _playedIndices.Clear();
+                            NavigateToPlaylistIndex(_playlist.IndexOf(item));
                             StartPlaylistHideTimer();
                         }
                     }
@@ -4271,26 +4558,42 @@ namespace JonPlayer
                     // Key.F merged above
                 
                 case Key.Oem3:
-                    ResizeScreen(0.5); ShowToast("창 크기: 50%"); e.Handled = true; break;
+                    if (TryApplyWindowSizePreset(0.5)) ShowToast("창 크기: 50%");
+                    e.Handled = true;
+                    break;
                 case Key.D1:
-                case Key.NumPad1: ResizeScreen(1.0); ShowToast("창 크기: 100%"); e.Handled = true; break;
+                case Key.NumPad1:
+                    if (TryApplyWindowSizePreset(1.0)) ShowToast("창 크기: 100%");
+                    e.Handled = true;
+                    break;
                 case Key.D2:
-                case Key.NumPad2: ResizeScreen(2.0); ShowToast("창 크기: 200%"); e.Handled = true; break;
+                case Key.NumPad2:
+                    if (TryApplyWindowSizePreset(2.0)) ShowToast("창 크기: 200%");
+                    e.Handled = true;
+                    break;
                 
                 case Key.Z:
-                    if (VideoViewbox.Stretch == System.Windows.Media.Stretch.Uniform) {
-                        VideoViewbox.Stretch = System.Windows.Media.Stretch.UniformToFill;
-                        VideoElement.Stretch = System.Windows.Media.Stretch.UniformToFill;
-                        ShowToast("화면 맞춤: 가득 채우기 (자르기)");
-                    } else if (VideoViewbox.Stretch == System.Windows.Media.Stretch.UniformToFill) {
-                        VideoViewbox.Stretch = System.Windows.Media.Stretch.Fill;
-                        VideoElement.Stretch = System.Windows.Media.Stretch.Fill;
-                        ShowToast("화면 맞춤: 강제 늘림");
+                    // Toggle video stretch/zoom mode. This affects the actual D3D renderer output (aspect correction in viewport).
+                    // WPF Viewbox/Image updates kept for any fallback/legacy uses.
+                    System.Windows.Media.Stretch newStretch;
+                    string toastMsg;
+                    if (_currentVideoStretch == System.Windows.Media.Stretch.Uniform) {
+                        newStretch = System.Windows.Media.Stretch.UniformToFill;
+                        toastMsg = "화면 맞춤: 가득 채우기 (자르기)";
+                    } else if (_currentVideoStretch == System.Windows.Media.Stretch.UniformToFill) {
+                        newStretch = System.Windows.Media.Stretch.Fill;
+                        toastMsg = "화면 맞춤: 강제 늘림";
                     } else {
-                        VideoViewbox.Stretch = System.Windows.Media.Stretch.Uniform;
-                        VideoElement.Stretch = System.Windows.Media.Stretch.Uniform;
-                        ShowToast("화면 맞춤: 원본 비율 (여백)");
+                        newStretch = System.Windows.Media.Stretch.Uniform;
+                        toastMsg = "화면 맞춤: 원본 비율 (여백)";
                     }
+                    _currentVideoStretch = newStretch;
+
+                    if (VideoViewbox != null) VideoViewbox.Stretch = newStretch;
+                    if (VideoElement != null) VideoElement.Stretch = newStretch;
+                    if (_renderer != null) _renderer.StretchMode = newStretch;
+
+                    ShowToast(toastMsg);
                     e.Handled = true; break;
 
                 case Key.OemComma:
@@ -4366,8 +4669,7 @@ namespace JonPlayer
             if (!_decoder.IsRunning) state = "Stopped";
 
             bool decodeHw = stats.IsRealHwAccel || _decoder.LastDecodedFrameIsHardware;
-            bool renderHw = _renderer?.LastFrameIsHardware == true;
-            stats.RendererMode = (decodeHw && renderHw) ? "D3D11" : "BGRA";
+            stats.RendererMode = _renderer?.LastRendererMode ?? "—";
             if (!decodeHw)
             {
                 stats.DecoderMode = stats.IsHwAccel ? "SW Fallback" : "Software";
@@ -4413,7 +4715,10 @@ namespace JonPlayer
                 sbLeft.AppendLine($"Queue  V{stats.VideoPacketQueueSize} A{stats.AudioPacketQueueSize}");
                 if (hasVideo)
                 {
-                    sbLeft.AppendLine($"A/V    {stats.AvDiffMs:F0} ms");
+                    sbLeft.AppendLine($"A/Vclk {stats.AvDiffMs:F0} ms");
+                    sbLeft.AppendLine($"RawV-A {stats.AvSyncMs:F0} ms");
+                    sbLeft.AppendLine($"Offset {stats.SyncDelayMs:F0} ms");
+                    sbLeft.AppendLine("Master=Audio");
                 }
                 sbLeft.AppendLine($"CPU    {cpuUsage:F1}%");
                 sbLeft.Append($"State  {state}");
@@ -4427,11 +4732,9 @@ namespace JonPlayer
             sbLeft.AppendLine($"{"Codec".PadRight(12)}{codec}");
             if (hasVideo)
             {
-                if (_audioEnhancer != null)
-                {
-                    double gainDb = 20 * Math.Log10(Math.Max(0.0001, _audioEnhancer.BaselineVolumeMultiplier));
-                    sbLeft.AppendLine($"{"Audio Gain".PadRight(12)}{gainDb:+0.0;-0.0;0.0} dB");
-                }
+                sbLeft.AppendLine($"{"Auto Gain".PadRight(12)}{_lastAutoGainDb:+0.0;-0.0;0.0} dB");
+                if (!double.IsNaN(_lastDetectedMeanDb))
+                    sbLeft.AppendLine($"{"Mean Vol".PadRight(12)}{_lastDetectedMeanDb:F1} dB");
                 sbLeft.AppendLine($"{"Resolution".PadRight(12)}{res}");
                 sbLeft.AppendLine($"{"Reader FPS".PadRight(12)}{stats.ReaderFps:F1}");
                 sbLeft.AppendLine($"{"V.DecodeFPS".PadRight(12)}{stats.VideoDecodeFps:F1} / {stats.TargetFps:F1}");
@@ -4459,15 +4762,11 @@ namespace JonPlayer
             sbLeft.AppendLine($"{"Memory".PadRight(12)}{memoryMb:F0} MB");
             sbLeft.AppendLine($"{"Threads".PadRight(12)}{totalThreads}");
             sbLeft.AppendLine($"{"Decode".PadRight(12)}{decodeMode}");
-            if (_audioEnhancer != null)
-            {
-                double gainDb = 20 * Math.Log10(Math.Max(0.0001, _audioEnhancer.BaselineVolumeMultiplier));
-                sbLeft.AppendLine($"{"Audio Gain".PadRight(12)}{gainDb:+0.0;-0.0;0.0} dB");
-            }
-            else
-            {
-                sbLeft.AppendLine($"{"Audio Gain".PadRight(12)}{0.0:+0.0;-0.0;0.0} dB");
-            }
+            sbLeft.AppendLine($"{"Auto Gain".PadRight(12)}{_lastAutoGainDb:+0.0;-0.0;0.0} dB");
+            if (!double.IsNaN(_lastDetectedMeanDb))
+                sbLeft.AppendLine($"{"Mean Vol".PadRight(12)}{_lastDetectedMeanDb:F1} dB (tgt {AutoVolumeTargetMeanDb:F0})");
+            int pref = _userPreferredVolume;
+            sbLeft.AppendLine($"{"Slider".PadRight(12)}{(int)(SliderVolume?.Value ?? 0)}% (pref {pref}% ±{AutoVolumeMaxOffset}%)");
             sbLeft.AppendLine();
 
             sbLeft.AppendLine("Status Session");
@@ -4504,7 +4803,9 @@ namespace JonPlayer
                 sbRight.AppendLine($"{"V.Dec PTS".PadRight(12)}{stats.VideoDecodePts:F0} ms");
                 sbRight.AppendLine($"{"Audio PTS".PadRight(12)}{stats.AudioPts:F0} ms");
                 sbRight.AppendLine($"{"MasterClk".PadRight(12)}{stats.MasterClock:F0} ms");
-                sbRight.AppendLine($"{"A/V Diff".PadRight(12)}{stats.AvDiffMs:F0} ms");
+                sbRight.AppendLine($"{"A/V clock".PadRight(12)}{stats.AvDiffMs:F0} ms");
+                sbRight.AppendLine($"{"Raw V-A".PadRight(12)}{stats.AvSyncMs:F0} ms");
+                sbRight.AppendLine($"{"Offset".PadRight(12)}{stats.SyncDelayMs:F0} ms");
                 sbRight.AppendLine($"{"DecodeLead".PadRight(12)}{stats.DecodeLeadMs:F0} ms");
                 sbRight.AppendLine($"{"LateFrames".PadRight(12)}{stats.LateFrames}");
             }

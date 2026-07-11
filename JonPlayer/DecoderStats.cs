@@ -11,6 +11,7 @@ public struct DecoderStats
 	public double AudioDecodeTimeMs;
 	public double MasterClock;
 	public double AvDiffMs;
+	public double AvSyncMs;
 	public double SyncDelayMs;
 	
 	// render

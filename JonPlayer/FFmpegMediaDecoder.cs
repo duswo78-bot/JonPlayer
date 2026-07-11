@@ -13,15 +13,22 @@ namespace JonPlayer;
 
 public class FFmpegMediaDecoder : IDisposable
 {
+	public enum SwVideoBufferLayout
+	{
+		None,
+		Bgra,
+		Nv12
+	}
+
 	public class DecodedVideoFrame : IDisposable
 	{
 		public IntPtr TexturePtr;
 
-		public byte[]? BgraBuffer;
-
-		public GCHandle BgraHandle;
-
 		public IntPtr BgraPointer;
+
+		public IntPtr Nv12Pointer;
+
+		public SwVideoBufferLayout BufferLayout;
 
 		public int Width;
 
@@ -35,8 +42,15 @@ public class FFmpegMediaDecoder : IDisposable
 
 		public unsafe AVFrame* AvFrame;
 
+		private int _disposed;
+
 		public unsafe void Dispose()
 		{
+			// Idempotent: render teardown + PresentBlack may dispose the same held frame twice.
+			if (Interlocked.Exchange(ref _disposed, 1) != 0)
+			{
+				return;
+			}
 			if (AvFrame != null)
 			{
 				fixed (AVFrame** frame = &AvFrame)
@@ -45,10 +59,9 @@ public class FFmpegMediaDecoder : IDisposable
 				}
 				AvFrame = null;
 			}
-			if (BgraHandle.IsAllocated)
-			{
-				BgraHandle.Free();
-			}
+			TexturePtr = IntPtr.Zero;
+			BgraPointer = IntPtr.Zero;
+			Nv12Pointer = IntPtr.Zero;
 		}
 	}
 
@@ -80,6 +93,14 @@ public class FFmpegMediaDecoder : IDisposable
 
 	private AVPixelFormat _swsSrcFormat = AVPixelFormat.AV_PIX_FMT_NONE;
 
+	private unsafe SwsContext* _swsNv12Context;
+
+	private AVPixelFormat _swsNv12SrcFormat = AVPixelFormat.AV_PIX_FMT_NONE;
+
+	private unsafe byte*[]? _swsNv12DstData;
+
+	private readonly int[] _swsNv12DstStrides = new int[8];
+
 	private double _lastValidPtsTime;
 
 	private double _baseAudioPtsMs = -1.0;
@@ -88,10 +109,249 @@ public class FFmpegMediaDecoder : IDisposable
 
 	private double _lastValidAudioPtsTime;
 
-	private byte[][] _swsBgraBuffers = new byte[6][];
-	private GCHandle[] _swsBgraHandles = new GCHandle[6];
-	private IntPtr[] _swsBgraPointers = new IntPtr[6];
+	private const int SwsBgraPoolSize = 15;
+
+	/// <summary>SW NV12 rotating pool. Must stay larger than SW decoded queue + one held render frame.</summary>
+	private const int SwNv12PoolSize = 16;
+
+	/// <summary>Phase1 (#40): upload NV12/YUV420P to GPU instead of sws_scale→BGRA when true.</summary>
+	public static bool EnableSwGpuYuvPath = true;
+
+	// libswscale flags — see libavutil/pixdesc.h
+	private const int SwsFlagBilinear = 2;
+	private const int SwsFlagBicubic = 4;
+	private const int SwsFlagArea = 0x20;
+	private const int SwsFlagFullChrHInt = 0x2000;
+	private const int SwsFlagFullChrHInp = 0x4000;
+	private const int SwsFlagAccurateRnd = 0x40000;
+	private IntPtr[] _swsBgraPointers = new IntPtr[SwsBgraPoolSize];
 	private int _swsBgraBufferIndex = 0;
+	private int _swsBgraBufferSize = 0;
+
+	private IntPtr[] _swNv12Pointers = new IntPtr[SwNv12PoolSize];
+	private int _swNv12BufferIndex = 0;
+	private int _swNv12BufferSize = 0;
+
+
+	// Pre-allocated to avoid per-frame 'new byte*[8]' / 'new int[8]' allocations in hot SW decode path
+	private unsafe byte*[] _swsDstData;
+	private readonly int[] _swsDstStrides = new int[8];
+
+	/// <summary>
+	/// Centralized free for SW BGRA native buffer pool. Safe to call multiple times.
+	/// </summary>
+	private unsafe void FreeSwsBgraPool()
+	{
+		for (int i = 0; i < SwsBgraPoolSize; i++)
+		{
+			if (_swsBgraPointers[i] != IntPtr.Zero)
+			{
+				NativeMemory.Free((void*)_swsBgraPointers[i]);
+				_swsBgraPointers[i] = IntPtr.Zero;
+			}
+		}
+		_swsBgraBufferSize = 0;
+	}
+
+	private unsafe void FreeSwNv12Pool()
+	{
+		for (int i = 0; i < SwNv12PoolSize; i++)
+		{
+			if (_swNv12Pointers[i] != IntPtr.Zero)
+			{
+				NativeMemory.Free((void*)_swNv12Pointers[i]);
+				_swNv12Pointers[i] = IntPtr.Zero;
+			}
+		}
+		_swNv12BufferSize = 0;
+	}
+
+	private static int GetNv12BufferSize(int width, int height) => width * height + width * (height / 2);
+
+	private static bool CanCopyDirectToNv12(AVPixelFormat format)
+	{
+		return format == AVPixelFormat.AV_PIX_FMT_NV12
+			|| format == AVPixelFormat.AV_PIX_FMT_YUV420P
+			|| format == AVPixelFormat.AV_PIX_FMT_YUVJ420P;
+	}
+
+	private unsafe static bool CanSwsConvertToNv12(AVPixelFormat format)
+	{
+		if (format == AVPixelFormat.AV_PIX_FMT_NONE || IsHardwarePixelFormat(format))
+		{
+			return false;
+		}
+		AVPixFmtDescriptor* desc = ffmpeg.av_pix_fmt_desc_get(format);
+		return desc != null && (desc->flags & ffmpeg.AV_PIX_FMT_FLAG_HWACCEL) == 0;
+	}
+
+	private unsafe static void CopyAvFrameToTightNv12(AVFrame* frame, byte* dst, int width, int height)
+	{
+		AVPixelFormat format = (AVPixelFormat)frame->format;
+		if (format == AVPixelFormat.AV_PIX_FMT_NV12)
+		{
+			int yStride = frame->linesize[0];
+			int uvStride = frame->linesize[1];
+			for (int row = 0; row < height; row++)
+			{
+				Buffer.MemoryCopy(
+					frame->data[0] + (nuint)(row * yStride),
+					dst + (nuint)(row * width),
+					width,
+					width);
+			}
+			byte* dstUv = dst + (nuint)(width * height);
+			int chromaHeight = height / 2;
+			for (int row = 0; row < chromaHeight; row++)
+			{
+				Buffer.MemoryCopy(
+					frame->data[1] + (nuint)(row * uvStride),
+					dstUv + (nuint)(row * width),
+					width,
+					width);
+			}
+			return;
+		}
+		if (format == AVPixelFormat.AV_PIX_FMT_YUV420P || format == AVPixelFormat.AV_PIX_FMT_YUVJ420P)
+		{
+			int yStride = frame->linesize[0];
+			int uStride = frame->linesize[1];
+			int vStride = frame->linesize[2];
+			for (int row = 0; row < height; row++)
+			{
+				Buffer.MemoryCopy(
+					frame->data[0] + (nuint)(row * yStride),
+					dst + (nuint)(row * width),
+					width,
+					width);
+			}
+			byte* dstUv = dst + (nuint)(width * height);
+			int chromaHeight = height / 2;
+			int chromaWidth = width / 2;
+			// Interleave U/V 8 bytes at a time to cut per-pixel loop overhead (SW hot path).
+			for (int row = 0; row < chromaHeight; row++)
+			{
+				byte* uRow = frame->data[1] + (nuint)(row * uStride);
+				byte* vRow = frame->data[2] + (nuint)(row * vStride);
+				byte* dstRow = dstUv + (nuint)(row * width);
+				int col = 0;
+				int packed = chromaWidth & ~7;
+				for (; col < packed; col += 8)
+				{
+					dstRow[0] = uRow[0]; dstRow[1] = vRow[0];
+					dstRow[2] = uRow[1]; dstRow[3] = vRow[1];
+					dstRow[4] = uRow[2]; dstRow[5] = vRow[2];
+					dstRow[6] = uRow[3]; dstRow[7] = vRow[3];
+					dstRow[8] = uRow[4]; dstRow[9] = vRow[4];
+					dstRow[10] = uRow[5]; dstRow[11] = vRow[5];
+					dstRow[12] = uRow[6]; dstRow[13] = vRow[6];
+					dstRow[14] = uRow[7]; dstRow[15] = vRow[7];
+					uRow += 8;
+					vRow += 8;
+					dstRow += 16;
+				}
+				for (; col < chromaWidth; col++)
+				{
+					*dstRow++ = *uRow++;
+					*dstRow++ = *vRow++;
+				}
+			}
+		}
+	}
+
+	private unsafe bool TrySwsScaleToTightNv12(AVFrame* src, byte* dst, int width, int height)
+	{
+		AVPixelFormat srcFormat = (AVPixelFormat)src->format;
+		if (!CanSwsConvertToNv12(srcFormat))
+		{
+			return false;
+		}
+		if (_swsNv12Context == null || _swsNv12SrcFormat != srcFormat)
+		{
+			if (_swsNv12Context != null)
+			{
+				ffmpeg.sws_freeContext(_swsNv12Context);
+				_swsNv12Context = null;
+			}
+			int swsFlags = GetSwsFlags(src->width, src->height, width, height);
+			_swsNv12Context = ffmpeg.sws_getContext(
+				src->width, src->height, srcFormat,
+				width, height, AVPixelFormat.AV_PIX_FMT_NV12,
+				swsFlags, null, null, null);
+			_swsNv12SrcFormat = srcFormat;
+		}
+		if (_swsNv12Context == null)
+		{
+			return false;
+		}
+		if (_swsNv12DstData == null)
+		{
+			_swsNv12DstData = new byte*[8];
+		}
+		_swsNv12DstData[0] = dst;
+		_swsNv12DstData[1] = dst + (nuint)(width * height);
+		_swsNv12DstStrides[0] = width;
+		_swsNv12DstStrides[1] = width;
+		return ffmpeg.sws_scale(
+			_swsNv12Context,
+			src->data, src->linesize,
+			0, src->height,
+			_swsNv12DstData, _swsNv12DstStrides) >= 0;
+	}
+
+	private unsafe bool TryFillGpuNv12DecodedFrame(AVFrame* src, DecodedVideoFrame decodedVideoFrame)
+	{
+		if (!EnableSwGpuYuvPath)
+		{
+			return false;
+		}
+		AVPixelFormat srcFormat = (AVPixelFormat)src->format;
+		bool directCopy = CanCopyDirectToNv12(srcFormat);
+		bool swsConvert = !directCopy && CanSwsConvertToNv12(srcFormat);
+		if (!directCopy && !swsConvert)
+		{
+			return false;
+		}
+		int width = src->width;
+		int height = src->height;
+		if (width <= 0 || height <= 0)
+		{
+			return false;
+		}
+		int nv12Bytes = GetNv12BufferSize(width, height);
+		if (_swNv12BufferSize < nv12Bytes)
+		{
+			FreeSwNv12Pool();
+			for (int i = 0; i < SwNv12PoolSize; i++)
+			{
+				_swNv12Pointers[i] = (IntPtr)NativeMemory.Alloc((nuint)nv12Bytes);
+			}
+			_swNv12BufferSize = nv12Bytes;
+		}
+		_swNv12BufferIndex = (_swNv12BufferIndex + 1) % SwNv12PoolSize;
+		IntPtr nv12Ptr = _swNv12Pointers[_swNv12BufferIndex];
+		bool filled;
+		if (directCopy)
+		{
+			CopyAvFrameToTightNv12(src, (byte*)nv12Ptr, width, height);
+			filled = true;
+		}
+		else
+		{
+			filled = TrySwsScaleToTightNv12(src, (byte*)nv12Ptr, width, height);
+		}
+		if (!filled)
+		{
+			return false;
+		}
+		decodedVideoFrame.BufferLayout = SwVideoBufferLayout.Nv12;
+		decodedVideoFrame.Nv12Pointer = nv12Ptr;
+		decodedVideoFrame.BgraPointer = IntPtr.Zero;
+		decodedVideoFrame.Width = width;
+		decodedVideoFrame.Height = height;
+		decodedVideoFrame.SliceIndexOrStride = width;
+		return true;
+	}
 
 private unsafe AVCodecContext* _audioCodecContext;
 
@@ -145,23 +405,56 @@ private unsafe AVCodecContext* _audioCodecContext;
 
 	private ConcurrentQueue<DecodedVideoFrame> _decodedVideoQueue = new ConcurrentQueue<DecodedVideoFrame>();
 
-	private const int MaxDecodedQueueSize = 5;
-
 	private double _avStartOffsetMs;
 
 	private bool _syncAvOffsetFromStreamStart = true;
 
-	private int _seekVideoSkipCount;
+	// Stream timeline alignment only (firstVideo - firstAudio). NEVER used to "zero" AvDiff —
+	// walking offset makes AvDiff look synced while lips are wrong (offset absorbs the error).
+	private double _emaAvDiffMs;
+
+	/// <summary>True when video is CPU-decoded (no D3D11 frames).</summary>
+	private volatile bool _isSoftwareVideoDecode;
+
+	// SW startup only: wait for a few decoded frames before first paint (does NOT touch audio PCM).
+	private const int SwStartupMinDecodedFrames = 3;
+
+	private enum SeekPhase { None, Active }
+
+	private volatile SeekPhase _seekPhase = SeekPhase.None;
+
+	private double _seekRequestedMs = -1.0;
+
+	private double _seekLandPtsMs = -1.0;
+
+	private volatile bool _seekVideoLanded;
+
+	private volatile bool _seekAudioLanded;
+
+	private const double SeekAudioLeadToleranceMs = 50.0;
+
+	private volatile bool _suppressAudioOutput;
+
+	private volatile bool _awaitingPostSeekVideoDisplay;
+	private double _postSeekTargetMs = -1.0;
+
+	private volatile int _videoDecodeWarmup;
+
+	// Audio-only UI clock: anchored to PCM actually submitted to WaveOut.
+	private double _audioOutputAnchorPtsMs = -1.0;
+
+	private long _audioOutputSamplesSubmitted;
+
+	private double _audioOutputEndPtsMs = -1.0;
 
 	private double _lastDisplayedVideoPtsMs = -1.0;
-
-	private long _videoPrimeUntilUtcTicks;
 
 	private volatile bool _isFirstVideoFrame = true;
 
 	private volatile bool _isFirstAudioFrame = true;
 
 	private volatile bool _isPreBuffering;
+	private DateTime _postSeekReducedPrebufferUntil = DateTime.MinValue;
 
 	private double _firstAudioPtsMs = -1.0;
 
@@ -186,6 +479,16 @@ private unsafe AVCodecContext* _audioCodecContext;
 	private string? _separateAudioUrl;
 
 	private double _seekTargetMs = -1.0;
+	private int _seekGeneration;
+	private int _activeSeekGen;
+
+	// === SEEK STABILIZATION & OPTIMIZATION NOTES ===
+	// - _seekGeneration + _activeSeekGen: rapid consecutive seeks cancel older ones' landing.
+	// - small forward seek: selective PTS clean of decoded frames (keep future work).
+	// - _postSeekReducedPrebufferUntil: shorter prebuffer after seek for snappier resume.
+	// - Land on first video frame (keyframe) for fast completion, but UI clock prefers user target.
+	// - Do not extend "isSeekingVideo" state longer than necessary (affects queueing and FPS).
+	// These were added to make seek both accurate and stable. Protect them.
 
 	private volatile bool _isFinished;
 
@@ -207,35 +510,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 
 	private volatile bool _isSeekingAudio;
 
-	private double _seekTargetPtsTime = -1.0;
 
-	private volatile bool _seekClockHold;
-
-	private volatile bool _seekAudioReady;
-
-	private volatile bool _seekVideoReady;
-
-	private double _seekAudioReadyPtsMs = -1.0;
-
-	private long _seekFinalizeEligibleUtcTicks;
-
-	private long _postSeekClockLockUntilUtcTicks;
-
-	private double _postSeekAudioSkipUntilPtsMs = -1.0;
-
-	private volatile bool _clearAudioBufferOnSeekPerformed;
-
-	private long _seekStartUtcTicks;
-
-	private volatile bool _postSeekOffsetSnapPending;
-
-	private const double SeekFinalizeSettleMs = 100.0;
-	private const double SeekHoldMaxDisplayLeadMs = 80.0;
-	private const double SeekVideoLedMinLeadMs = 40.0;
-
-	private const double PostSeekClockLockMs = 800.0;
-
-	private const double SeekMaxVideoLeadMs = 2000.0;
 
 	private bool _isDisposed;
 
@@ -257,6 +532,16 @@ private unsafe AVCodecContext* _audioCodecContext;
 
 	private double _fpsMeasureLastPtsMs = -1.0;
 
+	private double _streamFpsBaseline = 24.0;
+
+	private const double FpsRefineSmoothingAlpha = 0.18;
+
+	private const double NtscFilmFps = 24000.0 / 1001.0;
+
+	private const double NtscVideoFps = 30000.0 / 1001.0;
+
+	private const double NtscDoubleFps = 60000.0 / 1001.0;
+
 	private double _totalDecodeTimeMs;
 
 	private int _decodeTimeSamples;
@@ -270,6 +555,8 @@ private unsafe AVCodecContext* _audioCodecContext;
 	private DateTime _lastAudioFpsCalcTime = DateTime.UtcNow;
 
 	private double _lastVideoDecodeTimeMs;
+
+	private int _loggedSwBgraFallbackFormat = int.MinValue;
 
 	private double _lastAudioDecodeTimeMs;
 
@@ -296,6 +583,8 @@ private unsafe AVCodecContext* _audioCodecContext;
 	public bool IsRunning => _isRunning;
 
 	public bool IsPaused => _isPaused;
+
+	public bool IsSeekActive => _seekPhase == SeekPhase.Active;
 
 	public Func<double>? GetAudioBufferedDurationMs { get; set; }
 
@@ -348,9 +637,28 @@ private unsafe AVCodecContext* _audioCodecContext;
 
 	public bool HasVideo => _videoStreamIndex != -1;
 
+	public int DecodedVideoFrameCount => _decodedVideoQueue.Count;
+
+	public bool IsSeekIdle
+	{
+		get
+		{
+			lock (_lock)
+			{
+				return _seekPhase == SeekPhase.None && _seekTargetMs < 0.0;
+			}
+		}
+	}
+
+
+
+	public void BeginVideoDecodeWarmup() => Interlocked.Exchange(ref _videoDecodeWarmup, 1);
+
+	public void EndVideoDecodeWarmup() => Interlocked.Exchange(ref _videoDecodeWarmup, 0);
+
 	public event Action<IntPtr, int, int, int, bool>? FrameDecoded;
 
-	public event Action<byte[], int>? AudioDataAvailable;
+	public event Action<byte[], int, double>? AudioDataAvailable;
 
 	public event Action<double>? RotationDetected;
 
@@ -417,55 +725,167 @@ private unsafe AVCodecContext* _audioCodecContext;
 
 	public double TargetFps => _stats.TargetFps;
 
-	public double AvStartOffsetMs => _avStartOffsetMs;
+	public double AvStartOffsetMs => GetAvStartOffsetMs();
 
 	public double GetCurrentTimeMs() { return GetMasterClockPts(); }
 
-	public bool ConsumePendingAudioBufferClear()
-	{
-		if (!_clearAudioBufferOnSeekPerformed)
-		{
-			return false;
-		}
-		_clearAudioBufferOnSeekPerformed = false;
-		return true;
-	}
+	public bool ConsumePendingAudioBufferClear() => true;
 
 	public double GetAudioPlayheadPts()
 	{
-		if (_audioStreamIndex == -1 || _lastValidAudioPtsTime <= 0.0)
+		if (_audioStreamIndex == -1 || _firstAudioPtsMs < 0.0)
+		{
+			return double.NaN;
+		}
+		double bufferedMs = GetAudioBufferedDurationMs?.Invoke() ?? 0.0;
+		// WaveOut DesiredLatency overlaps BufferedDuration; only a small device residual.
+		double hwLatency = GetAudioHardwareLatencyMs?.Invoke() ?? 0.0;
+		double deviceResidualMs = Math.Clamp(hwLatency * 0.20, 15.0, 45.0);
+		double playhead = _lastValidAudioPtsTime - (bufferedMs + deviceResidualMs) * _playbackSpeed;
+		return playhead < 0.0 ? 0.0 : playhead;
+	}
+
+	/// <summary>
+	/// Signed A/V error in master(audio) domain.
+	/// Positive = audio ahead of displayed video (video late / needs catch-up).
+	/// </summary>
+	public double ComputeAvDiffMs(double videoPtsMs)
+	{
+		if (_audioStreamIndex == -1 || _lastDisplayedVideoPtsMs < 0.0 && videoPtsMs < 0.0)
+		{
+			return 0.0;
+		}
+		double audioPlayhead = GetAudioPlayheadPts();
+		if (double.IsNaN(audioPlayhead))
+		{
+			return 0.0;
+		}
+		double v = videoPtsMs >= 0.0 ? videoPtsMs : _lastDisplayedVideoPtsMs;
+		if (v < 0.0)
+		{
+			return 0.0;
+		}
+		return audioPlayhead - (v - GetAvStartOffsetMs());
+	}
+
+	public bool IsSoftwareVideoDecode => _isSoftwareVideoDecode;
+
+	private bool IsAudioOnlyPlayback => _videoStreamIndex == -1 && _audioStreamIndex != -1;
+
+	private int GetSoftwareDecodedFrameQueueCap()
+	{
+		int pixels = _width * _height;
+		// Jitter buffer for SW (pool is 16). Never starve presentation by being too small.
+		if (pixels > 3840 * 2160)
+		{
+			return 8;
+		}
+		if (pixels > 1920 * 1080)
+		{
+			return 10;
+		}
+		return 10;
+	}
+
+	public void ReleasePostSeekPlayback()
+	{
+		lock (_lock)
+		{
+			if (IsAudioOnlyPlayback)
+			{
+				_suppressAudioOutput = false;
+			}
+		}
+	}
+
+	public void NotifyAudioSamplesSubmitted(int sampleCount, double chunkEndPtsMs)
+	{
+		if (!IsAudioOnlyPlayback || sampleCount <= 0 || AudioSampleRate <= 0)
+		{
+			return;
+		}
+		if (_audioOutputAnchorPtsMs < 0.0)
+		{
+			double chunkMs = sampleCount * 1000.0 / AudioSampleRate;
+			_audioOutputAnchorPtsMs = Math.Max(0.0, chunkEndPtsMs - chunkMs);
+			_audioOutputSamplesSubmitted = 0L;
+		}
+		_audioOutputSamplesSubmitted += sampleCount;
+		_audioOutputEndPtsMs = _audioOutputAnchorPtsMs
+			+ _audioOutputSamplesSubmitted * 1000.0 / AudioSampleRate * _playbackSpeed;
+	}
+
+	private void ResetAudioOutputClock(double anchorPtsMs)
+	{
+		_audioOutputAnchorPtsMs = anchorPtsMs;
+		_audioOutputSamplesSubmitted = 0L;
+		_audioOutputEndPtsMs = -1.0;
+	}
+
+	private void ReleasePostSeekAudioOutput(double videoPtsMs)
+	{
+		if (!_suppressAudioOutput || !HasVideo)
+		{
+			return;
+		}
+		// First picture is on screen — start audio. Do NOT gate/throttle PCM quality after this.
+		_suppressAudioOutput = false;
+		_awaitingPostSeekVideoDisplay = false;
+		if (!_syncAvOffsetFromStreamStart)
+		{
+			SetAvStartOffsetMs(0.0);
+		}
+		SeekLog($"[AV_START_RELEASE] videoPts={videoPtsMs:F0} sw={_isSoftwareVideoDecode} offset={GetAvStartOffsetMs():F0}");
+	}
+
+	private double GetAudioOutputPlayheadPts()
+	{
+		if (_audioOutputEndPtsMs < 0.0)
 		{
 			return double.NaN;
 		}
 		double bufferedMs = GetAudioBufferedDurationMs?.Invoke() ?? 0.0;
 		double hwLatency = GetAudioHardwareLatencyMs?.Invoke() ?? 0.0;
-		return _lastValidAudioPtsTime - (bufferedMs + hwLatency) * _playbackSpeed;
+		double playhead = _audioOutputEndPtsMs - (bufferedMs + hwLatency) * _playbackSpeed;
+		return playhead < 0.0 ? 0.0 : playhead;
+	}
+
+	private double GetAudioOnlyUiClockPts()
+	{
+		double outputPlayhead = GetAudioOutputPlayheadPts();
+		if (!double.IsNaN(outputPlayhead))
+		{
+			return outputPlayhead;
+		}
+		return _currentPlaybackPtsTime;
+	}
+
+	private double GetStopwatchClockPts()
+	{
+		if (_masterClockStopwatch.IsRunning)
+		{
+			return _currentPlaybackPtsTime + (double)_masterClockStopwatch.ElapsedMilliseconds * _playbackSpeed;
+		}
+		return _currentPlaybackPtsTime;
 	}
 
 	public double GetMasterClockPts()
 	{
-		if (_seekClockHold)
-		{
-			return _currentPlaybackPtsTime;
-		}
 		if (_isPaused)
 		{
 			return _currentPlaybackPtsTime;
 		}
-		if (_postSeekOffsetSnapPending
-			&& _postSeekClockLockUntilUtcTicks > 0L
-			&& DateTime.UtcNow.Ticks >= _postSeekClockLockUntilUtcTicks)
+		if (_seekPhase == SeekPhase.Active)
 		{
-			_postSeekOffsetSnapPending = false;
-			TrySnapAvOffsetAfterSeek();
-		}
-		if (DateTime.UtcNow.Ticks < _postSeekClockLockUntilUtcTicks)
-		{
-			if (_masterClockStopwatch.IsRunning)
+			if (_seekLandPtsMs >= 0.0)
 			{
-				return _currentPlaybackPtsTime + (double)_masterClockStopwatch.ElapsedMilliseconds * _playbackSpeed;
+				return _seekLandPtsMs;
 			}
 			return _currentPlaybackPtsTime;
+		}
+		if (IsAudioOnlyPlayback)
+		{
+			return GetAudioOnlyUiClockPts();
 		}
 		if (_audioStreamIndex != -1 && !_isSeekingAudio)
 		{
@@ -475,18 +895,14 @@ private unsafe AVCodecContext* _audioCodecContext;
 				return audioPlayhead;
 			}
 		}
-		if (_masterClockStopwatch.IsRunning)
-		{
-			return _currentPlaybackPtsTime + (double)_masterClockStopwatch.ElapsedMilliseconds * _playbackSpeed;
-		}
-		return _currentPlaybackPtsTime;
+		return GetStopwatchClockPts();
 	}
 
 	private double CapturePlaybackPtsMs()
 	{
-		if (_seekClockHold)
+		if (IsAudioOnlyPlayback)
 		{
-			return _currentPlaybackPtsTime;
+			return GetAudioOnlyUiClockPts();
 		}
 		if (_audioStreamIndex != -1 && !_isSeekingAudio)
 		{
@@ -496,15 +912,44 @@ private unsafe AVCodecContext* _audioCodecContext;
 				return audioPlayhead;
 			}
 		}
-		if (_masterClockStopwatch.IsRunning)
+		return GetStopwatchClockPts();
+	}
+
+	/// <summary>
+	/// Common origin for A/V (container start). Using per-stream start_time for each stream
+	/// independently made Offset absorb multi-second fake "sync" (Diff≈0 while lips wrong).
+	/// </summary>
+	private unsafe static double GetContainerStartOffsetMs(AVFormatContext* formatContext)
+	{
+		if (formatContext == null)
 		{
-			return _currentPlaybackPtsTime + (double)_masterClockStopwatch.ElapsedMilliseconds * _playbackSpeed;
+			return 0.0;
 		}
-		return _currentPlaybackPtsTime;
+		if (formatContext->start_time != ffmpeg.AV_NOPTS_VALUE)
+		{
+			// AV_TIME_BASE = 1_000_000
+			return (double)formatContext->start_time * 1000.0 / 1000000.0;
+		}
+		// Fallback: earliest stream start on the container.
+		double minStart = double.MaxValue;
+		for (uint i = 0; i < formatContext->nb_streams; i++)
+		{
+			AVStream* st = formatContext->streams[i];
+			if (st != null && st->start_time != ffmpeg.AV_NOPTS_VALUE)
+			{
+				double ms = (double)st->start_time * ffmpeg.av_q2d(st->time_base) * 1000.0;
+				if (ms < minStart)
+				{
+					minStart = ms;
+				}
+			}
+		}
+		return minStart < double.MaxValue ? minStart : 0.0;
 	}
 
 	private unsafe static double GetStreamStartOffsetMs(AVFormatContext* formatContext, int streamIndex)
 	{
+		// Kept for seek helpers that still need stream-local mapping.
 		if (formatContext == null || streamIndex < 0 || streamIndex >= formatContext->nb_streams)
 		{
 			return 0.0;
@@ -514,13 +959,12 @@ private unsafe AVCodecContext* _audioCodecContext;
 		{
 			return (double)ptr->start_time * ffmpeg.av_q2d(ptr->time_base) * 1000.0;
 		}
-		if (formatContext->start_time != ffmpeg.AV_NOPTS_VALUE)
-		{
-			return (double)formatContext->start_time * 1000.0 / 1000000.0;
-		}
-		return 0.0;
+		return GetContainerStartOffsetMs(formatContext);
 	}
 
+	/// <summary>
+	/// Media time in ms on a SHARED container timeline (same origin for audio and video).
+	/// </summary>
 	private unsafe static double GetNormalizedPtsMs(long pts, AVFormatContext* formatContext, int streamIndex)
 	{
 		if (formatContext == null || streamIndex < 0 || streamIndex >= formatContext->nb_streams || pts == ffmpeg.AV_NOPTS_VALUE)
@@ -532,7 +976,8 @@ private unsafe AVCodecContext* _audioCodecContext;
 		{
 			return 0.0;
 		}
-		return (double)pts * ffmpeg.av_q2d(ptr->time_base) * 1000.0 - GetStreamStartOffsetMs(formatContext, streamIndex);
+		double absoluteMs = (double)pts * ffmpeg.av_q2d(ptr->time_base) * 1000.0;
+		return absoluteMs - GetContainerStartOffsetMs(formatContext);
 	}
 
 	private unsafe static long GetSeekTimestamp(AVFormatContext* formatContext, double targetMs)
@@ -577,40 +1022,58 @@ private unsafe AVCodecContext* _audioCodecContext;
 	private int GetVideoPacketQueueLimit()
 	{
 		int pixels = _width * _height;
+		int baseLimit = 300;
 		if (pixels > 3840 * 2160)
 		{
-			return 20;
+			baseLimit = 20;
 		}
-		if (pixels > 1920 * 1080)
+		else if (pixels > 1920 * 1080)
 		{
-			return 30;
+			baseLimit = 30;
 		}
-		return 300;
+		if (DateTime.UtcNow < _postSeekReducedPrebufferUntil)
+		{
+			return Math.Max(5, baseLimit / 5); // smaller during post-seek
+		}
+		return baseLimit;
 	}
 
 	private int GetAudioPacketQueueLimit()
 	{
 		int pixels = _width * _height;
+		int baseLimit = 600;
 		if (pixels > 3840 * 2160)
 		{
-			return 60;
+			baseLimit = 60;
 		}
-		if (pixels > 1920 * 1080)
+		else if (pixels > 1920 * 1080)
 		{
-			return 100;
+			baseLimit = 100;
 		}
-		return 600;
+		if (DateTime.UtcNow < _postSeekReducedPrebufferUntil)
+		{
+			return Math.Max(10, baseLimit / 5);
+		}
+		return baseLimit;
 	}
 
 	private int GetVideoPrebufferTarget()
 	{
 		int limit = GetVideoPacketQueueLimit();
+		if (DateTime.UtcNow < _postSeekReducedPrebufferUntil)
+		{
+			return 4; // temporarily small after seek for faster resume
+		}
 		return Math.Max(4, limit / 4);
 	}
 
 	private int GetAudioPrebufferTarget()
 	{
 		int limit = GetAudioPacketQueueLimit();
+		if (DateTime.UtcNow < _postSeekReducedPrebufferUntil)
+		{
+			return 8;
+		}
 		return Math.Max(8, limit / 4);
 	}
 
@@ -628,8 +1091,35 @@ private unsafe AVCodecContext* _audioCodecContext;
 		return 12;
 	}
 
+	/// <summary>
+	/// Pick swscale flags for the SW BGRA path. Higher resolutions and downscales
+	/// use stronger filters; full-chroma interpolation reduces banding on YUV sources.
+	/// </summary>
+	private static int GetSwsFlags(int srcWidth, int srcHeight, int dstWidth, int dstHeight)
+	{
+		int chromaFlags = SwsFlagFullChrHInt | SwsFlagFullChrHInp;
+		long srcPixels = (long)srcWidth * srcHeight;
+		long dstPixels = (long)dstWidth * dstHeight;
+		bool downscaling = dstPixels < srcPixels;
+
+		if (dstPixels > 3840L * 2160)
+		{
+			return SwsFlagBicubic | chromaFlags | SwsFlagAccurateRnd;
+		}
+		if (dstPixels > 1920L * 1080)
+		{
+			return SwsFlagBicubic | chromaFlags;
+		}
+		if (downscaling)
+		{
+			return SwsFlagArea | chromaFlags;
+		}
+		return SwsFlagBilinear | chromaFlags;
+	}
+
 	private double GetAudioDecodeBufferTargetMs()
 	{
+		// Smooth audio always — never shrink buffer to "fix" video lag (causes crackle).
 		int pixels = _width * _height;
 		if (pixels > 3840 * 2160)
 		{
@@ -673,12 +1163,19 @@ private unsafe AVCodecContext* _audioCodecContext;
 		{
 			double audioPlayhead = GetAudioPlayheadPts();
 			_stats.AudioPts = audioPlayhead;
-			_stats.AvDiffMs = audioPlayhead - (displayedVideoPts - _avStartOffsetMs);
+			// AvDiff = clock-domain error (with stream offset). RawGap = content PTS gap (video - audio).
+			// If Offset is wrong, Diff can look ~0 while RawGap is huge — trust RawGap for lips.
+			double instant = ComputeAvDiffMs(displayedVideoPts);
+			_stats.AvDiffMs = instant;
+			_stats.AvSyncMs = displayedVideoPts - (double.IsNaN(audioPlayhead) ? 0.0 : audioPlayhead); // raw V-A gap
+			_stats.SyncDelayMs = GetAvStartOffsetMs();
 		}
 		else
 		{
 			_stats.AudioPts = (_audioStreamIndex != -1 ? GetAudioPlayheadPts() : 0);
 			_stats.AvDiffMs = 0;
+			_stats.AvSyncMs = 0;
+			_stats.SyncDelayMs = GetAvStartOffsetMs();
 		}
 
 		_stats.MasterClock = GetMasterClockPts();
@@ -706,12 +1203,22 @@ private unsafe AVCodecContext* _audioCodecContext;
 			throw new ObjectDisposedException("FFmpegMediaDecoder");
 		}
 		Stop();
+		JoinWorkerThreads(5000);
 		int waitMs = 0;
-		while (Interlocked.CompareExchange(ref _activeThreads, 0, 0) > 0 && waitMs < 5000)
+		while ((Interlocked.CompareExchange(ref _activeThreads, 0, 0) > 0 || Interlocked.CompareExchange(ref _isOpening, 0, 0) == 1) && waitMs < 5000)
 		{
 			Thread.Sleep(10);
 			waitMs += 10;
 		}
+		bool threadsIdle = Interlocked.CompareExchange(ref _activeThreads, 0, 0) == 0
+			&& Interlocked.CompareExchange(ref _isOpening, 0, 0) == 0;
+		if (!threadsIdle)
+		{
+			Logger.Warn("Decoder open wait timed out while FFmpeg work is still active; joining worker threads before cleanup.");
+			JoinWorkerThreads(2000);
+			threadsIdle = Interlocked.CompareExchange(ref _activeThreads, 0, 0) == 0;
+		}
+		EnsureReleasedBeforeOpen(threadsIdle);
 		Interlocked.Exchange(ref _isCleanedUp, 0);
 		Interlocked.Exchange(ref _isOpening, 1);
 		_currentPath = path;
@@ -725,22 +1232,26 @@ private unsafe AVCodecContext* _audioCodecContext;
 		_firstAudioPtsMs = -1.0;
 		_firstVideoPtsMs = -1.0;
 		_avStartOffsetMs = 0.0;
+		_emaAvDiffMs = 0.0;
+		_isSoftwareVideoDecode = false;
+		_videoDecodeWarmup = 0;
 		_syncAvOffsetFromStreamStart = true;
-		_seekVideoSkipCount = 0;
 		_lastDisplayedVideoPtsMs = -1.0;
-		_videoPrimeUntilUtcTicks = 0L;
 		_seekTargetMs = -1.0;
-		_seekTargetPtsTime = -1.0;
-		_seekClockHold = false;
-		_seekAudioReady = false;
-		_seekVideoReady = false;
-		_seekAudioReadyPtsMs = -1.0;
-		_seekFinalizeEligibleUtcTicks = 0L;
-		_postSeekClockLockUntilUtcTicks = 0L;
-		_postSeekAudioSkipUntilPtsMs = -1.0;
-		_clearAudioBufferOnSeekPerformed = false;
-		_seekStartUtcTicks = 0L;
-		_postSeekOffsetSnapPending = false;
+		_seekPhase = SeekPhase.None;
+		_seekRequestedMs = -1.0;
+		_postSeekTargetMs = -1.0;
+		_postSeekReducedPrebufferUntil = DateTime.MinValue;
+		_seekLandPtsMs = -1.0;
+		_postSeekTargetMs = -1.0;
+		_postSeekReducedPrebufferUntil = DateTime.MinValue;
+		_seekVideoLanded = false;
+		_seekAudioLanded = false;
+		_suppressAudioOutput = false;
+		_awaitingPostSeekVideoDisplay = false;
+		_audioOutputAnchorPtsMs = -1.0;
+		_audioOutputSamplesSubmitted = 0L;
+		_audioOutputEndPtsMs = -1.0;
 		_isSeekingVideo = false;
 		_isSeekingAudio = false;
 
@@ -748,6 +1259,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 		_currentPlaybackPtsTime = 0.0;
 		_lastValidPtsTime = 0.0;
 		_lastValidAudioPtsTime = 0.0;
+		_baseAudioPtsMs = -1.0;
 		_isFinished = false;
 		_masterClockStopwatch.Reset();
 		_packetsReadThisSecond = 0;
@@ -837,7 +1349,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 				{
 					SeekLog($"[OPEN_SEEK_FAIL] target={num:F0} ret={num2}");
 				}
-				BeginSeekRecovery(num);
+				BeginSeek(num);
 			}
 			if (_videoStreamIndex != -1)
 			{
@@ -878,7 +1390,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 				}
 				_videoCodecContext = ffmpeg.avcodec_alloc_context3(codec);
 				ffmpeg.avcodec_parameters_to_context(_videoCodecContext, codecpar2);
-				ConfigureVideoCodecThreads(_videoCodecContext, codecpar2->codec_id);
+				ConfigureVideoCodecThreads(_videoCodecContext, codecpar2->codec_id, codecpar2->width, codecpar2->height);
 				if (useHwVideoDecode)
 				{
 					_getFormatCallback = GetFormat;
@@ -897,32 +1409,33 @@ private unsafe AVCodecContext* _audioCodecContext;
 				string codecName = ffmpeg.avcodec_get_name(codecpar2->codec_id);
 				if (ffmpeg.avcodec_open2(_videoCodecContext, codec, null) < 0)
 				{
-					if (hwAttempted && isHighRes && EnableHwAccel)
-					{
-						SeekLog($"[HW_OPEN_FAIL] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} — 4K/8K requires D3D11VA, software fallback not allowed");
-						throw new Exception($"4K/8K playback requires D3D11VA hardware decoding, but opening {codecName} ({_videoCodecContext->width}x{_videoCodecContext->height}) failed.");
-					}
 					if (hwAttempted)
 					{
-						SeekLog($"[HW_OPEN_FAIL] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} — retrying without D3D11VA");
+						// High-res included: prefer SW reopen over hard fail (NV12 GPU path can still play 4K SW).
+						SeekLog($"[HW_OPEN_FAIL] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} — retrying without D3D11VA{(isHighRes ? " (high-res SW fallback)" : "")}");
 						if (!ReopenVideoCodecWithoutHw(codecpar2, &codec) || ffmpeg.avcodec_open2(_videoCodecContext, codec, null) < 0)
 						{
 							throw new Exception("Could not open video codec");
 						}
 						hwAttempted = false;
+						ResyncDemuxAfterVideoCodecChange(num >= 0.0 ? num : 0.0);
+						if (isHighRes)
+						{
+							SeekLog($"[SW_FALLBACK_OK] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} — software decode (HW open failed)");
+						}
 					}
 					else
 					{
 						throw new Exception("Could not open video codec");
 					}
 				}
-				else if (hwAttempted && !ProbeVideoHwD3D11Decode(num, isHighRes))
+				else if (hwAttempted)
 				{
-					if (isHighRes && EnableHwAccel)
-					{
-						SeekLog($"[HW_PROBE_WARN] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} — D3D11 probe inconclusive, continuing with opened D3D11VA context");
-					}
-					else
+					// 4K/8K 8-bit: skip expensive open probe. 10-bit still probes — wrong sw_format breaks D3D11.
+					bool is10Bit = Is10BitVideoCodecpar(codecpar2);
+					bool skipHighResProbe = isHighRes && EnableHwAccel && !is10Bit;
+					bool probePassed = skipHighResProbe || ProbeVideoHwD3D11Decode(num, isHighRes);
+					if (!probePassed)
 					{
 						SeekLog($"[HW_PROBE_FAIL] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} — D3D11 frame probe failed, retrying without D3D11VA");
 						if (!ReopenVideoCodecWithoutHw(codecpar2, &codec) || ffmpeg.avcodec_open2(_videoCodecContext, codec, null) < 0)
@@ -930,15 +1443,31 @@ private unsafe AVCodecContext* _audioCodecContext;
 							throw new Exception("Could not open video codec");
 						}
 						hwAttempted = false;
+						// Probe consumed packets; reseek so SW starts at the same origin as audio.
+						ResyncDemuxAfterVideoCodecChange(num >= 0.0 ? num : 0.0);
+						if (isHighRes)
+						{
+							SeekLog($"[SW_FALLBACK_OK] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} — software decode (HW probe failed)");
+						}
+					}
+					else if (skipHighResProbe)
+					{
+						SeekLog($"[HW_OK] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} D3D11VA active (high-res probe skipped, 8-bit)");
+					}
+					else if (is10Bit)
+					{
+						SeekLog($"[HW_OK] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} D3D11VA active (10-bit probe passed)");
+					}
+					else
+					{
+						SeekLog($"[HW_OK] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} D3D11VA active");
 					}
 				}
-				else if (hwAttempted)
-				{
-					SeekLog($"[HW_OK] {_videoCodecContext->width}x{_videoCodecContext->height} {codecName} D3D11VA active");
-				}
-				EnsureVideoCodecSoftwareFallbackAllowed(codecpar2, _videoCodecContext->hw_device_ctx != null);
+				// High-res SW is allowed when HW is unavailable; only log (no throw).
+				LogSoftwareFallbackIfNeeded(codecpar2, _videoCodecContext->hw_device_ctx != null);
 				_width = _videoCodecContext->width;
 				_height = _videoCodecContext->height;
+				_isSoftwareVideoDecode = _videoCodecContext->hw_device_ctx == null;
 
 				_stats = new DecoderStats
 				{
@@ -1074,6 +1603,10 @@ private unsafe AVCodecContext* _audioCodecContext;
 			_readThread.Start();
 			if (HasVideo)
 			{
+				// Hold PCM until the first video frame is displayed (same gate as post-seek).
+				// Prevents audio-first start while video is still decoding.
+				_suppressAudioOutput = true;
+				_awaitingPostSeekVideoDisplay = true;
 				Interlocked.Increment(ref _activeThreads);
 				_videoThread = new Thread(VideoDecodeLoop)
 				{
@@ -1083,8 +1616,21 @@ private unsafe AVCodecContext* _audioCodecContext;
 				_videoThread.Start();
 			}
 		}
-		catch
+		catch (Exception ex)
 		{
+			Logger.Error("Exception during decoder Open, performing cleanup", ex);
+			_isRunning = false;
+			_isPaused = false;
+			// Signal events so any partially started threads can wake and exit
+			_videoPacketAvailableEvent.Set();
+			_audioPacketAvailableEvent.Set();
+			lock (_lock)
+			{
+				Monitor.PulseAll(_lock);
+			}
+			// Wait for any threads we managed to start before forcing cleanup
+			JoinWorkerThreads(3000);
+			Interlocked.Exchange(ref _isCleanedUp, 0);
 			Cleanup();
 			throw;
 		}
@@ -1140,53 +1686,60 @@ private unsafe AVCodecContext* _audioCodecContext;
 		return codec;
 	}
 
-	private unsafe static void ConfigureVideoCodecThreads(AVCodecContext* ctx, AVCodecID codecId)
+	private unsafe static void ConfigureVideoCodecThreads(AVCodecContext* ctx, AVCodecID codecId, int width = 0, int height = 0)
 	{
+		int cores = Math.Max(1, Environment.ProcessorCount);
+		bool highRes = IsHighResolution(width, height);
 		if (codecId == AVCodecID.AV_CODEC_ID_AV1)
 		{
-			ctx->thread_count = Math.Min(Environment.ProcessorCount, 8);
+			// libdav1d/frame threads scale well; allow more on high-res SW.
+			ctx->thread_count = Math.Min(cores, highRes ? 12 : 8);
 			ctx->thread_type = ffmpeg.FF_THREAD_FRAME;
 		}
 		else
 		{
-			ctx->thread_count = Math.Min(Environment.ProcessorCount, 4);
+			// H.264/HEVC: raise cap from 4 → 8 (12 on high-res) for SW decode throughput.
+			ctx->thread_count = Math.Min(cores, highRes ? 12 : 8);
 			ctx->thread_type = ffmpeg.FF_THREAD_FRAME | ffmpeg.FF_THREAD_SLICE;
 		}
 	}
 
 	private unsafe bool AttachVideoHwDevice(AVCodecContext* ctx)
 	{
-		AVBufferRef* ptr = null;
-		if (_d3d11DevicePtr != IntPtr.Zero)
+		// Only share the renderer's D3D11 device. A separate av_hwdevice_ctx_create device
+		// produces textures the renderer cannot CopySubresourceRegion (silent black frames).
+		if (_d3d11DevicePtr == IntPtr.Zero)
 		{
-			ptr = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
-			if (ptr != null)
-			{
-				AVHWDeviceContext* data = (AVHWDeviceContext*)ptr->data;
-				AVD3D11VADeviceContext* hwctx = (AVD3D11VADeviceContext*)data->hwctx;
-				Marshal.AddRef(_d3d11DevicePtr);
-				hwctx->device = (ID3D11Device*)_d3d11DevicePtr;
-				if (_d3d11ContextPtr != IntPtr.Zero)
-				{
-					Marshal.AddRef(_d3d11ContextPtr);
-					hwctx->device_context = (ID3D11DeviceContext*)_d3d11ContextPtr;
-				}
-				else
-				{
-					hwctx->device_context = (ID3D11DeviceContext*)IntPtr.Zero;
-				}
-				if (ffmpeg.av_hwdevice_ctx_init(ptr) == 0)
-				{
-					ctx->hw_device_ctx = ffmpeg.av_buffer_ref(ptr);
-				}
-				ffmpeg.av_buffer_unref(&ptr);
-			}
+			SeekLog("[HW_DEVICE] no shared D3D11 device — HW path unavailable, SW fallback will be used");
+			return false;
 		}
-		if (ctx->hw_device_ctx == null && ffmpeg.av_hwdevice_ctx_create(&ptr, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0) == 0)
+		AVBufferRef* ptr = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
+		if (ptr == null)
+		{
+			return false;
+		}
+		AVHWDeviceContext* data = (AVHWDeviceContext*)ptr->data;
+		AVD3D11VADeviceContext* hwctx = (AVD3D11VADeviceContext*)data->hwctx;
+		Marshal.AddRef(_d3d11DevicePtr);
+		hwctx->device = (ID3D11Device*)_d3d11DevicePtr;
+		if (_d3d11ContextPtr != IntPtr.Zero)
+		{
+			Marshal.AddRef(_d3d11ContextPtr);
+			hwctx->device_context = (ID3D11DeviceContext*)_d3d11ContextPtr;
+		}
+		else
+		{
+			hwctx->device_context = (ID3D11DeviceContext*)IntPtr.Zero;
+		}
+		if (ffmpeg.av_hwdevice_ctx_init(ptr) == 0)
 		{
 			ctx->hw_device_ctx = ffmpeg.av_buffer_ref(ptr);
-			ffmpeg.av_buffer_unref(&ptr);
 		}
+		else
+		{
+			SeekLog("[HW_DEVICE] shared D3D11 device init failed — SW fallback will be used");
+		}
+		ffmpeg.av_buffer_unref(&ptr);
 		if (ctx->hw_device_ctx != null)
 		{
 			int pixelCount = ctx->width * ctx->height;
@@ -1198,6 +1751,72 @@ private unsafe AVCodecContext* _audioCodecContext;
 			return true;
 		}
 		return false;
+	}
+
+	private unsafe static bool Is10BitPixelFormat(AVPixelFormat format)
+	{
+		return format == AVPixelFormat.AV_PIX_FMT_P010LE
+			|| format == AVPixelFormat.AV_PIX_FMT_P010BE
+			|| format == AVPixelFormat.AV_PIX_FMT_YUV420P10LE
+			|| format == AVPixelFormat.AV_PIX_FMT_YUV420P10BE
+			|| format == AVPixelFormat.AV_PIX_FMT_YUV422P10LE
+			|| format == AVPixelFormat.AV_PIX_FMT_YUV444P10LE;
+	}
+
+	private unsafe static bool Is10BitVideoCodecpar(AVCodecParameters* codecpar)
+	{
+		if (codecpar->bits_per_raw_sample > 8 || codecpar->bits_per_coded_sample > 8)
+		{
+			return true;
+		}
+		if (Is10BitPixelFormat((AVPixelFormat)codecpar->format))
+		{
+			return true;
+		}
+		if (codecpar->codec_id == AVCodecID.AV_CODEC_ID_H264
+			&& (codecpar->profile == ffmpeg.AV_PROFILE_H264_HIGH_10
+				|| codecpar->profile == ffmpeg.AV_PROFILE_H264_HIGH_10_INTRA))
+		{
+			return true;
+		}
+		return false;
+	}
+
+	private unsafe static bool Is10BitVideoCodecContext(AVCodecContext* ctx)
+	{
+		if (ctx->bits_per_raw_sample > 8)
+		{
+			return true;
+		}
+		if (Is10BitPixelFormat(ctx->sw_pix_fmt) || Is10BitPixelFormat((AVPixelFormat)ctx->pix_fmt))
+		{
+			return true;
+		}
+		return false;
+	}
+
+	private unsafe static AVPixelFormat[] BuildHwSwFormatCandidates(AVCodecContext* ctx, bool is10Bit)
+	{
+		AVPixelFormat preferredSwFormat = (ctx->sw_pix_fmt != AVPixelFormat.AV_PIX_FMT_NONE)
+			? ctx->sw_pix_fmt
+			: (is10Bit ? AVPixelFormat.AV_PIX_FMT_P010LE : AVPixelFormat.AV_PIX_FMT_NV12);
+		if (is10Bit)
+		{
+			return new AVPixelFormat[4]
+			{
+				preferredSwFormat,
+				AVPixelFormat.AV_PIX_FMT_P010LE,
+				AVPixelFormat.AV_PIX_FMT_YUV420P10LE,
+				AVPixelFormat.AV_PIX_FMT_YUV420P10BE
+			};
+		}
+		return new AVPixelFormat[4]
+		{
+			preferredSwFormat,
+			AVPixelFormat.AV_PIX_FMT_NV12,
+			AVPixelFormat.AV_PIX_FMT_YUV420P,
+			AVPixelFormat.AV_PIX_FMT_P010LE
+		};
 	}
 
 	private unsafe bool AttachVideoHwFramesPool(AVCodecContext* ctx)
@@ -1223,15 +1842,9 @@ private unsafe AVCodecContext* _audioCodecContext;
 		framesCtx->width = ctx->width;
 		framesCtx->height = ctx->height;
 		int pixelCount = ctx->width * ctx->height;
+		bool is10Bit = Is10BitVideoCodecContext(ctx);
 		framesCtx->initial_pool_size = (pixelCount > 3840 * 2160) ? 32 : ((pixelCount > 1920 * 1080) ? 16 : 10);
-		AVPixelFormat preferredSwFormat = (ctx->sw_pix_fmt != AVPixelFormat.AV_PIX_FMT_NONE) ? ctx->sw_pix_fmt : AVPixelFormat.AV_PIX_FMT_NV12;
-		AVPixelFormat[] swFormatCandidates = new AVPixelFormat[4]
-		{
-			preferredSwFormat,
-			AVPixelFormat.AV_PIX_FMT_NV12,
-			AVPixelFormat.AV_PIX_FMT_YUV420P,
-			AVPixelFormat.AV_PIX_FMT_P010LE
-		};
+		AVPixelFormat[] swFormatCandidates = BuildHwSwFormatCandidates(ctx, is10Bit);
 		bool initialized = false;
 		for (int i = 0; i < swFormatCandidates.Length; i++)
 		{
@@ -1261,7 +1874,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 		}
 		if (!initialized)
 		{
-			SeekLog($"[HW_FRAMES_FAIL] av_hwframe_ctx_init failed for {ctx->width}x{ctx->height} sw={preferredSwFormat}");
+			SeekLog($"[HW_FRAMES_FAIL] av_hwframe_ctx_init failed for {ctx->width}x{ctx->height} 10bit={is10Bit} sw={ctx->sw_pix_fmt}");
 			AVBufferRef* failedRef = hwFramesRef;
 			ffmpeg.av_buffer_unref(&failedRef);
 			return false;
@@ -1301,6 +1914,11 @@ private unsafe AVCodecContext* _audioCodecContext;
 		return width > 0 && height > 0 && width * height > 1920 * 1080;
 	}
 
+	private static bool Is8KResolution(int width, int height)
+	{
+		return width > 0 && height > 0 && (long)width * height > 3840L * 2160;
+	}
+
 	private string ResolveDecoderModeLabel()
 	{
 		if (_lastDecodedFrameIsD3D11)
@@ -1314,9 +1932,13 @@ private unsafe AVCodecContext* _audioCodecContext;
 		return "Software";
 	}
 
-	private unsafe void EnsureVideoCodecSoftwareFallbackAllowed(AVCodecParameters* codecpar, bool hwActive)
+	/// <summary>
+	/// Logs when high-res plays on software. Previously threw and blocked 4K when D3D11VA
+	/// was unavailable; NV12 GPU upload path now makes high-res SW viable (slower).
+	/// </summary>
+	private unsafe void LogSoftwareFallbackIfNeeded(AVCodecParameters* codecpar, bool hwActive)
 	{
-		if (hwActive || !EnableHwAccel)
+		if (hwActive)
 		{
 			return;
 		}
@@ -1327,8 +1949,8 @@ private unsafe AVCodecContext* _audioCodecContext;
 			return;
 		}
 		string codecName = ffmpeg.avcodec_get_name(codecpar->codec_id);
-		SeekLog($"[SW_FALLBACK_BLOCKED] {width}x{height} {codecName} requires D3D11VA hardware decode");
-		throw new Exception($"4K/8K playback requires D3D11VA hardware decoding, but it is not available for {codecName} ({width}x{height}).");
+		string reason = EnableHwAccel ? "D3D11VA unavailable" : "forced SW (F4)";
+		SeekLog($"[SW_FALLBACK] {width}x{height} {codecName} — software decode ({reason}); may be slower than HW");
 	}
 
 	private unsafe bool ProbeVideoHwD3D11Decode(double seekMs, bool isHighRes)
@@ -1344,12 +1966,17 @@ private unsafe AVCodecContext* _audioCodecContext;
 		int lastFormat = -1;
 		try
 		{
-			if (isHighRes)
+			double targetMs = (seekMs >= 0.0) ? seekMs : 0.0;
+			int width = _videoCodecContext->width;
+			int height = _videoCodecContext->height;
+			bool is8K = Is8KResolution(width, height);
+			bool probeFromStart = isHighRes && targetMs > 1.0;
+			if (probeFromStart)
 			{
 				SeekFormatContext(_formatContext, _videoStreamIndex, 0.0);
 				ffmpeg.avcodec_flush_buffers(_videoCodecContext);
 			}
-			int maxPackets = isHighRes ? 500 : 200;
+			int maxPackets = is8K ? 64 : (isHighRes ? 120 : 80);
 			for (int i = 0; i < maxPackets && !decodedD3D11; i++)
 			{
 				if (ffmpeg.av_read_frame(_formatContext, probePkt) < 0)
@@ -1369,12 +1996,13 @@ private unsafe AVCodecContext* _audioCodecContext;
 				}
 				ffmpeg.av_packet_unref(probePkt);
 			}
-			double targetMs = (seekMs >= 0.0) ? seekMs : 0.0;
+			// ALWAYS reseek after probe — previously targetMs==0 skipped reseek and left demux mid-file,
+			// which produced firstVideo PTS seconds ahead of audio and a permanent multi-second Offset.
 			SeekFormatContext(_formatContext, _videoStreamIndex, targetMs);
 			ffmpeg.avcodec_flush_buffers(_videoCodecContext);
 			if (!decodedD3D11)
 			{
-				SeekLog($"[HW_PROBE_DETAIL] packets={packetsTried} lastFormat={lastFormat} targetMs={targetMs:F0}");
+				SeekLog($"[HW_PROBE_DETAIL] packets={packetsTried}/{maxPackets} lastFormat={lastFormat} targetMs={targetMs:F0} fromStart={probeFromStart} reseekt");
 			}
 		}
 		finally
@@ -1402,9 +2030,33 @@ private unsafe AVCodecContext* _audioCodecContext;
 		}
 		_videoCodecContext = ffmpeg.avcodec_alloc_context3(swCodec);
 		ffmpeg.avcodec_parameters_to_context(_videoCodecContext, codecpar);
-		ConfigureVideoCodecThreads(_videoCodecContext, codecpar->codec_id);
+		ConfigureVideoCodecThreads(_videoCodecContext, codecpar->codec_id, codecpar->width, codecpar->height);
 		*codec = swCodec;
 		return true;
+	}
+
+	/// <summary>After HW→SW reopen, put demux+codec back at the intended start so A/V share PTS origin.</summary>
+	private unsafe void ResyncDemuxAfterVideoCodecChange(double targetMs)
+	{
+		if (_formatContext == null || _videoStreamIndex < 0)
+		{
+			return;
+		}
+		double t = targetMs >= 0.0 ? targetMs : 0.0;
+		SeekFormatContext(_formatContext, _videoStreamIndex, t);
+		if (_videoCodecContext != null)
+		{
+			ffmpeg.avcodec_flush_buffers(_videoCodecContext);
+		}
+		if (_audioCodecContext != null)
+		{
+			ffmpeg.avcodec_flush_buffers(_audioCodecContext);
+		}
+		if (_audioFormatContext != null && _audioStreamIndex >= 0)
+		{
+			SeekFormatContext(_audioFormatContext, _audioStreamIndex, t);
+		}
+		SeekLog($"[DEMUX_RESYNC] after codec change targetMs={t:F0}");
 	}
 
 	private unsafe static bool IsHardwarePixelFormat(AVPixelFormat format)
@@ -1456,7 +2108,12 @@ private unsafe AVCodecContext* _audioCodecContext;
 					return *ptr;
 				}
 			}
-			SeekLog($"[HW_FORMAT_FAIL] D3D11 pixel format not offered for {s->width}x{s->height}, using software pixel format");
+			var offered = new List<int>(8);
+			for (AVPixelFormat* ptr = fmt; *ptr != AVPixelFormat.AV_PIX_FMT_NONE; ptr++)
+			{
+				offered.Add((int)*ptr);
+			}
+			SeekLog($"[HW_FORMAT_FAIL] D3D11 not offered for {s->width}x{s->height} sw_pix_fmt={s->sw_pix_fmt} offered=[{string.Join(",", offered)}]");
 		}
 		return GetSoftwarePixelFormat(s, fmt);
 	}
@@ -1555,19 +2212,26 @@ private unsafe AVCodecContext* _audioCodecContext;
 				return;
 			}
 			_isPaused = false;
+			// Keep stream offset fixed — do NOT rewrite offset from displayed frame (that fakes AvDiff=0).
 			_masterClockStopwatch.Restart();
 			Monitor.PulseAll(_lock);
 		}
-		ResyncVideoOffsetAfterPause();
 	}
 
-	private void ResyncVideoOffsetAfterPause()
+	private double GetAvStartOffsetMs()
 	{
-		if (!HasVideo || _lastDisplayedVideoPtsMs < 0.0)
+		lock (_lock)
 		{
-			return;
+			return _avStartOffsetMs;
 		}
-		_avStartOffsetMs = GetMasterClockPts() - _lastDisplayedVideoPtsMs;
+	}
+
+	private void SetAvStartOffsetMs(double value)
+	{
+		lock (_lock)
+		{
+			_avStartOffsetMs = value;
+		}
 	}
 
 	private void SyncPlaybackClockToPts(double ptsMs)
@@ -1579,147 +2243,64 @@ private unsafe AVCodecContext* _audioCodecContext;
 		}
 	}
 
-	private void BeginSeekRecovery(double targetPtsMs)
+	private void BeginSeek(double requestedTargetMs)
 	{
-		_seekTargetPtsTime = targetPtsMs;
-		_currentPlaybackPtsTime = targetPtsMs;
-		_seekClockHold = true;
-		_seekAudioReady = _audioStreamIndex == -1;
-		_seekVideoReady = _videoStreamIndex == -1;
-		_seekAudioReadyPtsMs = -1.0;
-		_seekFinalizeEligibleUtcTicks = 0L;
-		_postSeekClockLockUntilUtcTicks = 0L;
-		_postSeekAudioSkipUntilPtsMs = -1.0;
-		_clearAudioBufferOnSeekPerformed = false;
+		_seekRequestedMs = requestedTargetMs;
+		_postSeekTargetMs = requestedTargetMs;
+		_seekLandPtsMs = -1.0;
+		_seekPhase = SeekPhase.Active;
+		_seekVideoLanded = _videoStreamIndex == -1;
+		_seekAudioLanded = _audioStreamIndex == -1;
 		_isSeekingVideo = _videoStreamIndex != -1;
 		_isSeekingAudio = _audioStreamIndex != -1;
 		_syncAvOffsetFromStreamStart = false;
-		_avStartOffsetMs = 0.0;
+		SetAvStartOffsetMs(0.0);
+		_emaAvDiffMs = 0.0;
+		ResetAudioOutputClock(-1.0);
+		_awaitingPostSeekVideoDisplay = HasVideo;
+		_suppressAudioOutput = true;
 		_masterClockStopwatch.Reset();
-		_seekStartUtcTicks = DateTime.UtcNow.Ticks;
-		_videoPrimeUntilUtcTicks = DateTime.UtcNow.AddSeconds(5).Ticks;
-		SeekLog($"[SEEK_RECOVERY_BEGIN] target={targetPtsMs:F0} audio={_seekAudioReady} video={_seekVideoReady}");
+		SeekLog($"[SEEK_BEGIN] target={requestedTargetMs:F0} video={!_seekVideoLanded} audio={!_seekAudioLanded}");
 	}
 
-	private bool IsSeekDisplayReady()
+	private void TryCompleteSeek()
 	{
-		if (_videoStreamIndex == -1)
-		{
-			return true;
-		}
-		if (_lastDisplayedVideoPtsMs < 0.0)
-		{
-			return false;
-		}
-		return _lastDisplayedVideoPtsMs >= _seekTargetPtsTime - 300.0
-			&& _lastDisplayedVideoPtsMs <= _seekTargetPtsTime + SeekMaxVideoLeadMs;
-	}
-
-	private void TryFinalizeSeekPlayback()
-	{
-		if (!_seekClockHold)
-		{
-			return;
-		}
-		bool basicsReady = _seekAudioReady && _seekVideoReady;
-		bool displayReady = IsSeekDisplayReady();
-		if (basicsReady && displayReady)
-		{
-			if (_seekFinalizeEligibleUtcTicks == 0L)
-			{
-				_seekFinalizeEligibleUtcTicks = DateTime.UtcNow.AddMilliseconds(SeekFinalizeSettleMs).Ticks;
-				SeekLog($"[SEEK_RECOVERY_SETTLE] wait={SeekFinalizeSettleMs:F0}ms displayPts={_lastDisplayedVideoPtsMs:F0}");
-				return;
-			}
-			if (DateTime.UtcNow.Ticks < _seekFinalizeEligibleUtcTicks)
-			{
-				return;
-			}
-			FinalizeSeekPlayback();
-			return;
-		}
-		if (_seekAudioReady && (_seekVideoReady || _videoStreamIndex == -1))
-		{
-			long nowTicks = DateTime.UtcNow.Ticks;
-			long elapsedMs = _seekStartUtcTicks > 0
-				? (nowTicks - _seekStartUtcTicks) / TimeSpan.TicksPerMillisecond
-				: 0L;
-			bool displayOk = _videoStreamIndex == -1 || IsSeekDisplayReady();
-			if (displayOk && elapsedMs > 1200)
-			{
-				SeekLog("[SEEK_FORCE_FINALIZE] display ready, resuming after delay");
-				FinalizeSeekPlayback();
-				return;
-			}
-			if (elapsedMs > 2500)
-			{
-				SeekLog("[SEEK_FORCE_FINALIZE] timeout without ideal display, resuming at target");
-				FinalizeSeekPlayback();
-			}
-		}
-	}
-
-	private void FinalizeSeekPlayback()
-	{
-		double seekTarget;
+		double landPts;
+		double requestedMs;
 		lock (_lock)
 		{
-			if (!_seekClockHold || _seekTargetPtsTime < 0.0)
+			if (_seekPhase != SeekPhase.Active || !_seekVideoLanded || !_seekAudioLanded)
 			{
 				return;
 			}
-			seekTarget = _seekTargetPtsTime;
-			_seekClockHold = false;
-			_seekFinalizeEligibleUtcTicks = 0L;
-			_seekStartUtcTicks = 0L;
-		}
+			requestedMs = _seekRequestedMs;
+			landPts = _seekLandPtsMs >= 0.0 ? _seekLandPtsMs : requestedMs;
 
-		double clockPts = seekTarget;
-		if (HasVideo && _lastDisplayedVideoPtsMs >= 0.0)
-		{
-			double displayPts = _lastDisplayedVideoPtsMs;
-			double displayLeadMs = displayPts - seekTarget;
-			if (displayLeadMs > SeekVideoLedMinLeadMs)
-			{
-				clockPts = displayPts;
-				_avStartOffsetMs = 0.0;
-				double audioSkipLeadMs = Math.Clamp(displayLeadMs * 0.35, 60.0, 180.0);
-				_postSeekAudioSkipUntilPtsMs = displayPts - audioSkipLeadMs;
-				_clearAudioBufferOnSeekPerformed = true;
-				SeekLog($"[SEEK_VIDEO_LED] target={seekTarget:F0} display={displayPts:F0} lead={displayLeadMs:F0} audioSkipUntil={_postSeekAudioSkipUntilPtsMs:F0}");
-			}
-			else if (displayLeadMs < -SeekVideoLedMinLeadMs)
-			{
-				clockPts = seekTarget;
-				_avStartOffsetMs = seekTarget - displayPts;
-				SeekLog($"[SEEK_AUDIO_LED] target={seekTarget:F0} display={displayPts:F0} lag={-displayLeadMs:F0}");
-			}
-			else
-			{
-				clockPts = seekTarget;
-				_avStartOffsetMs = 0.0;
-			}
-			_syncAvOffsetFromStreamStart = false;
-		}
-		else if (_seekAudioReadyPtsMs >= 0.0 && Math.Abs(_seekAudioReadyPtsMs - seekTarget) <= 250.0)
-		{
-			clockPts = _seekAudioReadyPtsMs;
-		}
+			_seekPhase = SeekPhase.None;
+			_seekRequestedMs = -1.0;
+			_seekLandPtsMs = -1.0;
 
-		SyncPlaybackClockToPts(clockPts);
-		_postSeekClockLockUntilUtcTicks = DateTime.UtcNow.AddMilliseconds(PostSeekClockLockMs).Ticks;
-		_postSeekOffsetSnapPending = HasVideo && _audioStreamIndex != -1;
-		_videoPrimeUntilUtcTicks = DateTime.UtcNow.AddSeconds(3).Ticks;
-		_seekTargetPtsTime = -1.0;
-		_seekAudioReadyPtsMs = -1.0;
-		SeekLog($"[SEEK_RECOVERY_DONE] clock={clockPts:F0} target={seekTarget:F0} videoPts={_lastDisplayedVideoPtsMs:F0} offset={_avStartOffsetMs:F0}");
+			_currentPlaybackPtsTime = landPts;
+			_avStartOffsetMs = 0.0;
+			if (IsAudioOnlyPlayback)
+			{
+				_baseAudioPtsMs = landPts;
+				_totalOutputSamples = 0L;
+				_lastValidAudioPtsTime = landPts;
+				ResetAudioOutputClock(landPts);
+			}
+			if (!_isPaused)
+			{
+				_masterClockStopwatch.Restart();
+			}
+		}
+		SeekLog($"[SEEK_DONE] land={landPts:F0} requested={requestedMs:F0} videoPts={_lastDisplayedVideoPtsMs:F0} awaitVideo={_awaitingPostSeekVideoDisplay}");
 		SeekPerformed?.Invoke();
-		TrySnapAvOffsetAfterSeek();
 	}
 
 	private void TryStartPlaybackClock()
 	{
-		if (_seekClockHold)
+		if (_seekPhase == SeekPhase.Active || IsAudioOnlyPlayback)
 		{
 			return;
 		}
@@ -1735,75 +2316,95 @@ private unsafe AVCodecContext* _audioCodecContext;
 			}
 			return;
 		}
+		// AV1/webm: video often lands before audio PTS is ready — start on first stream available.
 		if (_firstAudioPtsMs >= 0.0)
 		{
 			SyncPlaybackClockToPts(_firstAudioPtsMs);
+			return;
+		}
+		if (_firstVideoPtsMs >= 0.0)
+		{
+			SyncPlaybackClockToPts(_firstVideoPtsMs);
 		}
 	}
 
-	private void SnapAvOffsetToMasterClock(double videoPtsMs)
+	private void EnsurePlaybackClockStarted()
 	{
-		_avStartOffsetMs = GetMasterClockPts() - videoPtsMs;
-		_syncAvOffsetFromStreamStart = false;
+		if (_seekPhase == SeekPhase.Active || IsAudioOnlyPlayback)
+		{
+			return;
+		}
+		TryStartPlaybackClock();
+		if (_masterClockStopwatch.IsRunning)
+		{
+			return;
+		}
+		if (_decodedVideoQueue.TryPeek(out DecodedVideoFrame? queuedHead))
+		{
+			SyncPlaybackClockToPts(queuedHead.PtsTime - GetAvStartOffsetMs());
+		}
 	}
 
-	private void TrySnapAvOffsetAfterSeek()
+	/// <summary>
+	/// Audio master only. Do not invent a faster clock — that made video free-run at V.DecodeFPS
+	/// (e.g. 32fps for 24fps content → 2min file ends at ~1.5min).
+	/// </summary>
+	private double GetVideoPacingClockPts()
 	{
-		if (!HasVideo || _lastDisplayedVideoPtsMs < 0.0 || _audioStreamIndex == -1)
-		{
-			return;
-		}
-		double audioPlayhead = GetAudioPlayheadPts();
-		if (double.IsNaN(audioPlayhead))
-		{
-			return;
-		}
-		double avDiffMs = audioPlayhead - _lastDisplayedVideoPtsMs;
-		if (Math.Abs(avDiffMs) > 40.0)
-		{
-			_avStartOffsetMs = avDiffMs;
-			_syncAvOffsetFromStreamStart = false;
-			SeekLog($"[SEEK_AV_SNAP] audio={audioPlayhead:F0} video={_lastDisplayedVideoPtsMs:F0} offset={_avStartOffsetMs:F0}");
-		}
+		return GetMasterClockPts();
 	}
 
 	private void MarkVideoFrameDisplayed(double ptsMs)
 	{
 		_lastDisplayedVideoPtsMs = ptsMs;
-		bool inPostSeekLock = DateTime.UtcNow.Ticks < _postSeekClockLockUntilUtcTicks;
-		if (!_seekClockHold && !inPostSeekLock && _audioStreamIndex != -1 && !_isSeekingAudio)
+		if (_awaitingPostSeekVideoDisplay)
 		{
-			double audioPlayhead = GetAudioPlayheadPts();
-			if (!double.IsNaN(audioPlayhead))
-			{
-				double avDiffMs = audioPlayhead - ptsMs;
-				if (Math.Abs(avDiffMs) > 40.0 && Math.Abs(avDiffMs) < 2000.0)
-				{
-					// Keep video aligned to the audible audio clock. Apply gradual correction
-					// to avoid sudden visible jumps when the audio output buffer fluctuates.
-					_avStartOffsetMs += avDiffMs * 0.10;
-					if (_avStartOffsetMs > 1000.0) _avStartOffsetMs = 1000.0;
-					else if (_avStartOffsetMs < -1000.0) _avStartOffsetMs = -1000.0;
-				}
-			}
+			ReleasePostSeekAudioOutput(ptsMs);
+			return;
 		}
-		if (_seekClockHold)
+		if (_seekPhase == SeekPhase.Active || _audioStreamIndex == -1 || _isSeekingAudio)
 		{
-			TryFinalizeSeekPlayback();
+			return;
 		}
+		// Stats only — never walk offset here (that fakes sync).
+		double avDiffMs = ComputeAvDiffMs(ptsMs);
+		_emaAvDiffMs = (_emaAvDiffMs == 0.0)
+			? avDiffMs
+			: (_emaAvDiffMs * 0.80 + avDiffMs * 0.20);
 	}
 
-	private void UpdateAvStartOffsetFromFirstFrames()
+	private unsafe void UpdateAvStartOffsetFromFirstFrames()
 	{
 		if (!_syncAvOffsetFromStreamStart)
 		{
 			return;
 		}
-		if (_firstAudioPtsMs >= 0.0 && _firstVideoPtsMs >= 0.0)
+		if (_firstAudioPtsMs < 0.0 || _firstVideoPtsMs < 0.0)
 		{
-			_avStartOffsetMs = _firstVideoPtsMs - _firstAudioPtsMs;
-			_syncAvOffsetFromStreamStart = false;
+			return;
 		}
+		// Audio is the master clock. Container-normalized PTS share one timeline → offset 0 for
+		// muxed files. Any multi-second firstV-firstA was a bug (made video free-run at decode FPS).
+		double raw = _firstVideoPtsMs - _firstAudioPtsMs;
+		bool dualAudio = _audioFormatContext != null;
+		double offset = 0.0;
+		if (dualAudio)
+		{
+			// Separate audio URL only: allow a small start skew, never multi-second.
+			offset = Math.Clamp(raw, -200.0, 200.0);
+		}
+		else if (Math.Abs(raw) > 50.0 && Math.Abs(raw) <= 200.0)
+		{
+			// Tiny residual only (encoder delay); large values discarded.
+			offset = raw;
+		}
+		if (Math.Abs(raw) > 200.0)
+		{
+			SeekLog($"[AV_OFFSET_ZERO] rawFirstDelta={raw:F0}ms ignored (audio master, shared timeline)");
+		}
+		SetAvStartOffsetMs(offset);
+		_syncAvOffsetFromStreamStart = false;
+		SeekLog($"[AV_OFFSET_SET] firstV={_firstVideoPtsMs:F0} firstA={_firstAudioPtsMs:F0} offset={offset:F0} dualAudio={dualAudio}");
 	}
 
 	public void Pause()
@@ -1823,11 +2424,9 @@ private unsafe AVCodecContext* _audioCodecContext;
 	public void Stop()
 	{
 		_isInterruptRequested = true;
-		if (!_isRunning)
-		{
-			return;
-		}
 		_isRunning = false;
+		_videoPacketAvailableEvent.Set();
+		_audioPacketAvailableEvent.Set();
 		lock (_lock)
 		{
 			_isPaused = false;
@@ -1843,18 +2442,158 @@ private unsafe AVCodecContext* _audioCodecContext;
 		}
 	}
 
+	/// <summary>
+	/// Releases any native FFmpeg resources left from a prior Open/playback session
+	/// before allocating new format/codec contexts.
+	/// </summary>
+	private unsafe void EnsureReleasedBeforeOpen(bool threadsIdle)
+	{
+		bool hasNativeResources = _formatContext != null
+			|| _audioFormatContext != null
+			|| _videoCodecContext != null
+			|| _audioCodecContext != null;
+		if (!hasNativeResources)
+		{
+			return;
+		}
+		if (!threadsIdle)
+		{
+			Logger.Error("Open aborted: prior FFmpeg contexts are still allocated while worker threads are active.");
+			throw new InvalidOperationException("Decoder is still shutting down; cannot open a new file yet.");
+		}
+
+		Interlocked.Exchange(ref _isCleanedUp, 0);
+		Cleanup();
+		_readThread = null;
+		_videoThread = null;
+		_audioThread = null;
+		Interlocked.Exchange(ref _activeThreads, 0);
+		_videoPacketAvailableEvent.Reset();
+		_audioPacketAvailableEvent.Reset();
+	}
+
+	/// <summary>
+	/// Waits for worker threads to complete (or timeout). Used in Dispose and before re-Open
+	/// to ensure Cleanup can run safely without races.
+	/// </summary>
+	private bool WaitForThreadsToFinish(int timeoutMs)
+	{
+		int waited = 0;
+		while ((Interlocked.CompareExchange(ref _activeThreads, 0, 0) > 0 || Interlocked.CompareExchange(ref _isOpening, 0, 0) == 1) && waited < timeoutMs)
+		{
+			Thread.Sleep(10);
+			waited += 10;
+		}
+		bool finished = Interlocked.CompareExchange(ref _activeThreads, 0, 0) == 0
+			&& Interlocked.CompareExchange(ref _isOpening, 0, 0) == 0;
+		if (!finished)
+		{
+			Logger.Warn($"Decoder thread wait timed out after {timeoutMs}ms (activeThreads={_activeThreads}).");
+		}
+		return finished;
+	}
+
+	private bool AreWorkerThreadsAlive()
+	{
+		return (_readThread?.IsAlive ?? false)
+			|| (_videoThread?.IsAlive ?? false)
+			|| (_audioThread?.IsAlive ?? false);
+	}
+
+	private void JoinWorkerThreads(int timeoutMs)
+	{
+		Thread?[] threads = { _readThread, _videoThread, _audioThread };
+		int aliveCount = 0;
+		foreach (Thread? thread in threads)
+		{
+			if (thread != null && thread.IsAlive)
+			{
+				aliveCount++;
+			}
+		}
+		if (aliveCount == 0)
+		{
+			return;
+		}
+		int perThreadTimeout = Math.Max(500, timeoutMs / Math.Max(1, aliveCount));
+		foreach (Thread? thread in threads)
+		{
+			if (thread != null && thread.IsAlive && !thread.Join(perThreadTimeout))
+			{
+				Logger.Warn($"Decoder worker thread '{thread.Name}' did not exit within {perThreadTimeout}ms.");
+			}
+		}
+	}
+
+	private void ForceCleanupIfNeeded()
+	{
+		if (Interlocked.CompareExchange(ref _isCleanedUp, 0, 0) == 1)
+		{
+			return;
+		}
+		Interlocked.Exchange(ref _isCleanedUp, 0);
+		try
+		{
+			Cleanup();
+		}
+		catch (Exception ex)
+		{
+			Logger.Error("ForceCleanupIfNeeded failed", ex);
+		}
+	}
+
+	private void DisposeSyncEvents()
+	{
+		try
+		{
+			_videoPacketAvailableEvent.Dispose();
+			_audioPacketAvailableEvent.Dispose();
+		}
+		catch (Exception ex)
+		{
+			Logger.Error("Failed to dispose decoder sync events", ex);
+		}
+	}
+
+	private void DeferredCleanupWorker()
+	{
+		try
+		{
+			_readThread?.Join(TimeSpan.FromSeconds(30));
+			_videoThread?.Join(TimeSpan.FromSeconds(30));
+			_audioThread?.Join(TimeSpan.FromSeconds(30));
+			Interlocked.Exchange(ref _activeThreads, 0);
+			ForceCleanupIfNeeded();
+			_readThread = null;
+			_videoThread = null;
+			_audioThread = null;
+			DisposeSyncEvents();
+		}
+		catch (Exception ex)
+		{
+			Logger.Error("Deferred decoder cleanup failed", ex);
+		}
+	}
+
+	private void ScheduleDeferredCleanup()
+	{
+		new Thread(DeferredCleanupWorker)
+		{
+			IsBackground = true,
+			Name = "FFmpegDeferredCleanup"
+		}.Start();
+	}
+
 	public unsafe void Seek(double ratio)
 	{
 		double num = ((_formatContext != null) ? ((double)_formatContext->duration / 1000000.0) : 0.0);
 		lock (_lock)
 		{
-			double targetPtsMs = ratio * num * 1000.0;
-			_seekTargetMs = targetPtsMs;
+			_seekTargetMs = ratio * num * 1000.0;
+			Interlocked.Increment(ref _seekGeneration);
+			// Generation helps cancel in-flight work from previous rapid seeks.
+			// See _activeSeekGen checks in land logic.
 			_isFinished = false;
-			_lastDisplayedVideoPtsMs = -1.0;
-			_seekVideoSkipCount = 0;
-			_postSeekOffsetSnapPending = false;
-			BeginSeekRecovery(targetPtsMs);
 			Monitor.PulseAll(_lock);
 		}
 	}
@@ -1923,6 +2662,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 				_lastReaderFpsCalcTime = readerNow;
 			}
 			double num = -1.0;
+			int thisSeekGen = 0;
 			lock (_lock)
 			{
 				if (_isFinished && _seekTargetMs < 0.0)
@@ -1933,10 +2673,11 @@ private unsafe AVCodecContext* _audioCodecContext;
 				if (_seekTargetMs >= 0.0)
 				{
 					num = _seekTargetMs;
+					thisSeekGen = _seekGeneration; // snapshot for this seek attempt (rapid seek cancel)
 				}
 				else
 				{
-					if (_isPaused)
+					if (_isPaused && _videoDecodeWarmup == 0)
 					{
 						Monitor.Wait(_lock, 50);
 						continue;
@@ -1974,6 +2715,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 					}
 				}
 			}
+
 			if (num >= 0.0)
 			{
 				int num3 = SeekFormatContext(_formatContext, _videoStreamIndex, num);
@@ -1989,6 +2731,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 				{
 					SeekLog($"[SEEK_FAIL_VIDEO] target={num:F0} ret={num3}");
 				}
+				_activeSeekGen = thisSeekGen; // current active gen for land checks (rapid seek protection)
 				lock (_lock)
 				{
 					IntPtr result;
@@ -1996,10 +2739,38 @@ private unsafe AVCodecContext* _audioCodecContext;
 					{
 						ReturnPacket((AVPacket*)result);
 					}
-					DecodedVideoFrame result2;
-					while (_decodedVideoQueue.TryDequeue(out result2))
+					// OPTIMIZATION: small forward seek -> PTS-based partial preserve of decoded frames.
+					// Avoids wasting work when user nudges the bar a little.
+					// Packet queues still fully cleared (compressed data not reusable).
+					double currentPos = _currentPlaybackPtsTime;
+					bool smallForwardSeek = (num > currentPos) && (num - currentPos < 5000.0);
+					if (smallForwardSeek)
 					{
-						result2.Dispose();
+						var kept = new List<DecodedVideoFrame>();
+						DecodedVideoFrame f;
+						while (_decodedVideoQueue.TryDequeue(out f))
+						{
+							if (f.PtsTime >= num - 1000.0) // keep from ~1s before new target
+							{
+								kept.Add(f);
+							}
+							else
+							{
+								f.Dispose();
+							}
+						}
+						foreach (var k in kept)
+						{
+							_decodedVideoQueue.Enqueue(k);
+						}
+					}
+					else
+					{
+						DecodedVideoFrame result2;
+						while (_decodedVideoQueue.TryDequeue(out result2))
+						{
+							result2.Dispose();
+						}
 					}
 					IntPtr result3;
 					while (_audioPacketQueue.TryDequeue(out result3))
@@ -2016,17 +2787,20 @@ private unsafe AVCodecContext* _audioCodecContext;
 					_isFirstVideoFrame = true;
 					_isFirstAudioFrame = true;
 					_isPreBuffering = true;
+					// OPTIMIZATION: temporarily lower pre-buffering after seek so playback resumes faster.
+					// User already waited for the seek; don't make them wait extra for full buffer.
+					_postSeekReducedPrebufferUntil = DateTime.UtcNow.AddSeconds(1.5);
 					_lastDecodedFrameIsD3D11 = false;
 					_firstAudioPtsMs = -1.0;
 					_firstVideoPtsMs = -1.0;
 					_avStartOffsetMs = 0.0;
 					_syncAvOffsetFromStreamStart = false;
-					_seekVideoSkipCount = 0;
-					_fpsMeasureLastPtsMs = -1.0;
+					ResetFpsMeasurement(resetTargetFromStream: true);
 					_lastDisplayedVideoPtsMs = -1.0;
 					_baseAudioPtsMs = -1.0;
 					_totalOutputSamples = 0L;
-					BeginSeekRecovery(num);
+					ResetAudioOutputClock(-1.0);
+					BeginSeek(num);
 					if (_seekTargetMs == num)
 					{
 						_seekTargetMs = -1.0;
@@ -2137,7 +2911,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 					_audioFramesDecodedThisSecond = 0;
 					_lastAudioFpsCalcTime = audioNow;
 				}
-				if (_isPaused && !_seekClockHold && _seekTargetMs < 0.0)
+				if (_isPaused && _seekPhase == SeekPhase.None && _seekTargetMs < 0.0)
 				{
 					Thread.Sleep(10);
 					continue;
@@ -2154,7 +2928,14 @@ private unsafe AVCodecContext* _audioCodecContext;
 						_swrContext = null;
 					}
 					FreeAudioFilterGraph();
-					SeekLog($"[SEEK_AUDIO_FLUSH] seekTarget={_seekTargetPtsTime:F0} lastAudioPts={_lastValidAudioPtsTime:F0}");
+					SeekLog($"[SEEK_AUDIO_FLUSH] requested={_seekRequestedMs:F0} lastAudioPts={_lastValidAudioPtsTime:F0}");
+				}
+				// Hold audio packets until first video frame is shown (start/seek). Continuous
+				// playback never starves or stutters audio to "wait for" SW video.
+				if (_suppressAudioOutput && HasVideo && _seekPhase == SeekPhase.None)
+				{
+					Thread.Sleep(5);
+					continue;
 				}
 				if (GetAudioBufferedDurationMs != null)
 				{
@@ -2268,7 +3049,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 							if (_baseAudioPtsMs >= 0.0 && _filteredAudioFrame->sample_rate > 0)
 							{
 								_lastValidAudioPtsTime = _baseAudioPtsMs + (double)_totalOutputSamples * _playbackSpeed * 1000.0 / (double)_filteredAudioFrame->sample_rate;
-								if (_isFirstAudioFrame && _lastValidAudioPtsTime > 0.0)
+								if (_isFirstAudioFrame )
 								{
 									_firstAudioPtsMs = _lastValidAudioPtsTime;
 									_isFirstAudioFrame = false;
@@ -2297,8 +3078,9 @@ private unsafe AVCodecContext* _audioCodecContext;
 					if (num6 != ffmpeg.AV_NOPTS_VALUE)
 					{
 						AVFormatContext* formatContext2 = ((_audioFormatContext != null) ? _audioFormatContext : _formatContext);
-						_lastValidAudioPtsTime = GetNormalizedPtsMs(num6, formatContext2, _audioStreamIndex);
-						if (_isFirstAudioFrame && _lastValidAudioPtsTime > 0.0)
+						double normalizedAudioPtsMs = GetNormalizedPtsMs(num6, formatContext2, _audioStreamIndex);
+						_lastValidAudioPtsTime = normalizedAudioPtsMs;
+						if (_isFirstAudioFrame)
 						{
 							_firstAudioPtsMs = _lastValidAudioPtsTime;
 							_isFirstAudioFrame = false;
@@ -2318,8 +3100,9 @@ private unsafe AVCodecContext* _audioCodecContext;
 				}
 			}
 		}
-		catch (Exception)
+		catch (Exception ex)
 		{
+			Logger.Error("AudioDecodeLoop unhandled exception", ex);
 		}
 		ThreadFinished();
 	}
@@ -2353,33 +3136,61 @@ private unsafe AVCodecContext* _audioCodecContext;
 		}
 		if (_isSeekingAudio)
 		{
-			if (_seekTargetPtsTime >= 0.0 && _lastValidAudioPtsTime < _seekTargetPtsTime - 100.0)
+			if (_seekPhase == SeekPhase.Active)
 			{
-				SeekLog($"[AUDIO_SKIP] isSeekingAudio={_isSeekingAudio} audioPts={_lastValidAudioPtsTime:F0} target={_seekTargetPtsTime:F0}");
-				return;
+				if (_videoStreamIndex != -1)
+				{
+					if (_seekLandPtsMs < 0.0)
+					{
+						return;
+					}
+					if (_lastValidAudioPtsTime < _seekLandPtsMs - SeekAudioLeadToleranceMs)
+					{
+						return;
+					}
+				}
+				_isSeekingAudio = false;
+				bool doLand = (_activeSeekGen == 0 || _activeSeekGen == _seekGeneration);
+				// RAPID SEEK PROTECTION (same as video)
+				lock (_lock)
+				{
+					if (doLand && _seekLandPtsMs < 0.0)
+					{
+						// For pure audio (MP3 etc.), prefer the user's requested target time
+						// if the decoded frame PTS is unreliable or far off. This helps
+						// the UI "point and seek" land closer to what the user clicked.
+						_seekLandPtsMs = _seekRequestedMs >= 0 ? _seekRequestedMs : _lastValidAudioPtsTime;
+					}
+					if (doLand)
+					{
+						_seekAudioLanded = true;
+					}
+				}
+				if (doLand)
+				{
+					TryCompleteSeek();
+				}
+				if (_seekPhase == SeekPhase.Active)
+				{
+					return;
+				}
 			}
-			_isSeekingAudio = false;
-			_seekAudioReady = true;
-			if (_seekAudioReadyPtsMs < 0.0)
+			else
 			{
-				_seekAudioReadyPtsMs = _lastValidAudioPtsTime;
+				_isSeekingAudio = false;
 			}
-			if (_seekClockHold)
-			{
-				TryFinalizeSeekPlayback();
-			}
+		}
+		if (_seekPhase == SeekPhase.Active)
+		{
+			return;
+		}
+		if (_suppressAudioOutput)
+		{
+			return;
 		}
 		if (_isPaused)
 		{
 			return;
-		}
-		if (_postSeekAudioSkipUntilPtsMs >= 0.0)
-		{
-			if (_lastValidAudioPtsTime < _postSeekAudioSkipUntilPtsMs)
-			{
-				return;
-			}
-			_postSeekAudioSkipUntilPtsMs = -1.0;
 		}
 		int num = ffmpeg.swr_get_out_samples(_swrContext, frameToConvert->nb_samples);
 		int num2 = ffmpeg.av_samples_get_buffer_size(null, AudioChannels, num, AVSampleFormat.AV_SAMPLE_FMT_S16, 1);
@@ -2399,23 +3210,29 @@ private unsafe AVCodecContext* _audioCodecContext;
 				try
 				{
 					Marshal.Copy(_audioBufferPointer, array, 0, num4);
-					this.AudioDataAvailable?.Invoke(array, num4);
+					this.AudioDataAvailable?.Invoke(array, num4, _lastValidAudioPtsTime);
 				}
 				finally
 				{
 					_audioBufferPool.Return(array);
 				}
-				if (!HasVideo)
+				// Timeline follows audio master for both A/V and audio-only (never video decode PTS).
+				if (_seekPhase == SeekPhase.None && !_suppressAudioOutput)
 				{
-					double num5 = ((GetAudioBufferedDurationMs != null) ? GetAudioBufferedDurationMs() : 0.0);
-					double num6 = (_lastValidAudioPtsTime - num5) / 1000.0;
+					double num6 = GetMasterClockPts() / 1000.0;
 					if (num6 < 0.0)
 					{
 						num6 = 0.0;
 					}
-					double num7 = (double)_formatContext->duration / 1000000.0;
-					double obj = num6 / num7;
-					this.PositionChanged?.Invoke(obj);
+					double num7 = DurationSeconds;
+					if (num7 <= 0.0 && _formatContext != null)
+					{
+						num7 = (double)_formatContext->duration / 1000000.0;
+					}
+					if (num7 > 0.05)
+					{
+						this.PositionChanged?.Invoke(Math.Clamp(num6 / num7, 0.0, 1.0));
+					}
 					this.TimeUpdated?.Invoke(TimeSpan.FromSeconds(num6), TimeSpan.FromSeconds(num7));
 				}
 			}
@@ -2426,28 +3243,15 @@ private unsafe AVCodecContext* _audioCodecContext;
 		}
 	}
 
-	private unsafe double ResolveStreamTargetFps()
+	private static double SnapToStandardFps(double fps)
 	{
-		AVStream* stream = _formatContext->streams[_videoStreamIndex];
-		double rFps = ffmpeg.av_q2d(stream->r_frame_rate);
-		double avgFps = ffmpeg.av_q2d(stream->avg_frame_rate);
-		double codecFps = 0.0;
-		if (_videoCodecContext != null && _videoCodecContext->framerate.num > 0 && _videoCodecContext->framerate.den > 0)
-		{
-			codecFps = ffmpeg.av_q2d(_videoCodecContext->framerate);
-		}
-
-		double fps = 0.0;
-		foreach (double candidate in new[] { rFps, avgFps, codecFps })
-		{
-			if (candidate >= 23.0 && candidate <= 240.0)
-			{
-				fps = Math.Max(fps, candidate);
-			}
-		}
 		if (fps <= 0.0)
 		{
-			fps = 60.0;
+			return 24.0;
+		}
+		if (fps > 59.0 && fps < 61.0)
+		{
+			return NtscDoubleFps;
 		}
 		if (fps > 58.0 && fps < 62.0)
 		{
@@ -2457,15 +3261,111 @@ private unsafe AVCodecContext* _audioCodecContext;
 		{
 			return 50.0;
 		}
+		if (fps > 29.4 && fps < 30.1)
+		{
+			return NtscVideoFps;
+		}
 		if (fps > 29.0 && fps < 30.5)
 		{
 			return 30.0;
+		}
+		if (fps > 23.5 && fps < 24.1)
+		{
+			return NtscFilmFps;
 		}
 		if (fps > 23.5 && fps < 24.5)
 		{
 			return 24.0;
 		}
 		return fps;
+	}
+
+	private static double RationalToFps(AVRational rational)
+	{
+		if (rational.num <= 0 || rational.den <= 0)
+		{
+			return 0.0;
+		}
+		return (double)rational.num / rational.den;
+	}
+
+	private static double SnapRationalFps(AVRational rational)
+	{
+		if (rational.num <= 0 || rational.den <= 0)
+		{
+			return 0.0;
+		}
+		if (rational.num == 24000 && rational.den == 1001)
+		{
+			return NtscFilmFps;
+		}
+		if (rational.num == 30000 && rational.den == 1001)
+		{
+			return NtscVideoFps;
+		}
+		if (rational.num == 60000 && rational.den == 1001)
+		{
+			return NtscDoubleFps;
+		}
+		return SnapToStandardFps(RationalToFps(rational));
+	}
+
+	private unsafe double ResolveStreamTargetFps()
+	{
+		AVStream* stream = _formatContext->streams[_videoStreamIndex];
+		double avgFps = SnapRationalFps(stream->avg_frame_rate);
+		double rFps = SnapRationalFps(stream->r_frame_rate);
+		double codecFps = 0.0;
+		if (_videoCodecContext != null && _videoCodecContext->framerate.num > 0 && _videoCodecContext->framerate.den > 0)
+		{
+			codecFps = SnapRationalFps(_videoCodecContext->framerate);
+		}
+		if (TryGetCodecparFps(stream->codecpar, out double parFps))
+		{
+			codecFps = Math.Max(codecFps, parFps);
+		}
+
+		double fps = 0.0;
+		if (avgFps >= 23.0 && avgFps <= 240.0)
+		{
+			fps = avgFps;
+		}
+		else
+		{
+			foreach (double candidate in new[] { rFps, codecFps })
+			{
+				if (candidate >= 23.0 && candidate <= 240.0)
+				{
+					fps = (fps <= 0.0) ? candidate : Math.Min(fps, candidate);
+				}
+			}
+		}
+		if (fps <= 0.0)
+		{
+			fps = 24.0;
+		}
+		return fps;
+	}
+
+	private unsafe static bool TryGetCodecparFps(AVCodecParameters* codecpar, out double fps)
+	{
+		fps = 0.0;
+		if (codecpar == null || codecpar->framerate.num <= 0 || codecpar->framerate.den <= 0)
+		{
+			return false;
+		}
+		fps = SnapRationalFps(codecpar->framerate);
+		return fps >= 23.0 && fps <= 240.0;
+	}
+
+	private unsafe void ResetFpsMeasurement(bool resetTargetFromStream)
+	{
+		_fpsMeasureLastPtsMs = -1.0;
+		if (resetTargetFromStream && HasVideo && _formatContext != null && _videoStreamIndex >= 0)
+		{
+			_streamFpsBaseline = ResolveStreamTargetFps();
+			_stats.TargetFps = _streamFpsBaseline;
+		}
 	}
 
 	private void RefineTargetFpsFromPts(double ptsMs)
@@ -2478,7 +3378,15 @@ private unsafe AVCodecContext* _audioCodecContext;
 				double instantFps = 1000.0 / ptsDelta;
 				if (instantFps >= 23.0 && instantFps <= 240.0)
 				{
-					_stats.TargetFps = Math.Max(_stats.TargetFps, instantFps);
+					double current = _stats.TargetFps;
+					if (current < 23.0 || current > 240.0)
+					{
+						current = _streamFpsBaseline > 0.0 ? _streamFpsBaseline : instantFps;
+					}
+					double smoothed = current + FpsRefineSmoothingAlpha * (instantFps - current);
+					double baseline = _streamFpsBaseline > 0.0 ? _streamFpsBaseline : current;
+					smoothed = Math.Clamp(smoothed, baseline * 0.85, baseline * 1.15);
+					_stats.TargetFps = SnapToStandardFps(smoothed);
 				}
 			}
 		}
@@ -2489,9 +3397,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 	{
 		double num = (double)_formatContext->duration / 1000000.0;
 		TimeSpan arg = TimeSpan.FromSeconds(num);
-		double num2 = ResolveStreamTargetFps();
-		_stats.TargetFps = num2;
-		_fpsMeasureLastPtsMs = -1.0;
+		ResetFpsMeasurement(resetTargetFromStream: true);
 		_stats.LateFrames = 0;
 		_framesDecodedThisSecond = 0;
 		_totalDecodeTimeMs = 0.0;
@@ -2506,7 +3412,7 @@ private unsafe AVCodecContext* _audioCodecContext;
 		int num9 = default(int);
 		while (_isRunning)
 		{
-			if (_isPaused && !_seekClockHold && _seekTargetMs < 0.0)
+			if (_isPaused && _videoDecodeWarmup == 0 && _seekPhase == SeekPhase.None && _seekTargetMs < 0.0)
 			{
 				Thread.Sleep(10);
 				continue;
@@ -2518,7 +3424,17 @@ private unsafe AVCodecContext* _audioCodecContext;
 			}
 			if (!_videoPacketQueue.TryDequeue(out var result))
 			{
-				if (_isFinished && !_notifiedPlaybackFinished)
+				// Only signal end-of-playback when demux is done, no more packets to decode,
+				// decoded frames have been drained (displayed), and audio output is nearly empty.
+				// Firing on packet-empty alone was premature: auto-next cut the last frames/audio
+				// and raced with PlayFile setup (stuck _isOpeningFile / missed playlist advance).
+				// End only when demux is done, video drained, AND audio packets+output drained.
+				// Finishing on video-empty alone cut 2min files short when video free-ran at decode FPS.
+				if (_isFinished
+					&& !_notifiedPlaybackFinished
+					&& _decodedVideoQueue.IsEmpty
+					&& _audioPacketQueue.IsEmpty
+					&& (GetAudioBufferedDurationMs == null || GetAudioBufferedDurationMs() < 50.0))
 				{
 					_notifiedPlaybackFinished = true;
 					this.PlaybackFinished?.Invoke();
@@ -2548,10 +3464,16 @@ private unsafe AVCodecContext* _audioCodecContext;
 				_lastVideoDecodeTimeMs = stopwatch2.Elapsed.TotalMilliseconds;
 				bool flag = _videoFrame->format == (int)AVPixelFormat.AV_PIX_FMT_D3D11;
 				_lastDecodedFrameIsD3D11 = flag;
+				_isSoftwareVideoDecode = !flag;
 				_stats.IsRealHwAccel = flag;
 				if (!flag && _videoCodecContext->hw_device_ctx != null && IsHighResolution(_videoCodecContext->width, _videoCodecContext->height))
 				{
-					SeekLog($"[HW_RUNTIME_FAIL] expected D3D11 got format={_videoFrame->format} at {_videoCodecContext->width}x{_videoCodecContext->height}");
+					// One-shot log; NV12 path below may still display. BGRA remains blocked for high-res+hw_ctx.
+					if (_loggedSwBgraFallbackFormat != _videoFrame->format)
+					{
+						_loggedSwBgraFallbackFormat = _videoFrame->format;
+						SeekLog($"[HW_RUNTIME_FAIL] expected D3D11 got format={_videoFrame->format} at {_videoCodecContext->width}x{_videoCodecContext->height} — attempting SW convert");
+					}
 				}
 				IntPtr texturePtr = IntPtr.Zero;
 				int sliceIndexOrStride = 0;
@@ -2612,27 +3534,26 @@ private unsafe AVCodecContext* _audioCodecContext;
 				RefineTargetFpsFromPts(num5);
 				if (_isSeekingVideo)
 				{
-					bool reachedTarget = num5 >= _seekTargetPtsTime - 100.0;
-					bool skipBudgetExhausted = ++_seekVideoSkipCount > 180;
-					if (!reachedTarget && !skipBudgetExhausted)
-					{
-						if (ptr3 != null)
-						{
-							ReturnFrame(ptr3);
-						}
-						ReturnFrame(_videoFrame);
-						_videoFrame = GetFrame();
-						stopwatch.Reset();
-						continue;
-					}
 					_isSeekingVideo = false;
-					if (!_seekClockHold)
+					bool doLand = (_activeSeekGen == 0 || _activeSeekGen == _seekGeneration);
+					// RAPID SEEK PROTECTION: only land for the latest seek gen.
+					// Older seeks' frames are ignored so we don't complete a stale seek.
+					lock (_lock)
 					{
-						_avStartOffsetMs = _currentPlaybackPtsTime - num5;
+						if (_seekPhase == SeekPhase.Active && _seekLandPtsMs < 0.0 && doLand)
+						{
+							_seekLandPtsMs = num5;
+						}
+						if (doLand)
+						{
+							_seekVideoLanded = true;
+						}
 					}
-					_seekVideoReady = true;
-					TryFinalizeSeekPlayback();
-					stopwatch.Restart();
+					if (doLand)
+					{
+						SeekLog($"[SEEK_VIDEO_LAND] pts={num5:F0} requested={_seekRequestedMs:F0}");
+						TryCompleteSeek();
+					}
 				}
 				lock (_lock)
 				{
@@ -2663,15 +3584,45 @@ private unsafe AVCodecContext* _audioCodecContext;
 				}
 				else
 				{
-					if (_swsBgraBuffers[0] == null || _swsBgraBuffers[0].Length < _width * _height * 4)
+					bool usedGpuNv12 = TryFillGpuNv12DecodedFrame(ptr2, decodedVideoFrame);
+					if (usedGpuNv12)
 					{
-						for (int i = 0; i < 6; i++)
+						if (ptr3 != null)
 						{
-							if (_swsBgraHandles[i].IsAllocated) _swsBgraHandles[i].Free();
-							_swsBgraBuffers[i] = new byte[_width * _height * 4];
-							_swsBgraHandles[i] = GCHandle.Alloc(_swsBgraBuffers[i], GCHandleType.Pinned);
-							_swsBgraPointers[i] = _swsBgraHandles[i].AddrOfPinnedObject();
+							ReturnFrame(ptr3);
 						}
+						ReturnFrame(_videoFrame);
+						_videoFrame = GetFrame();
+					}
+					else
+					{
+					if (IsHighResolution(_width, _height) && _videoCodecContext->hw_device_ctx != null)
+					{
+						SeekLog($"[SW_BGRA_BLOCKED] {_width}x{_height} format={ptr2->format} — 4K/8K CPU BGRA not allowed (use GPU YUV or D3D11VA)");
+						decodedVideoFrame.Dispose();
+						if (ptr3 != null)
+						{
+							ReturnFrame(ptr3);
+						}
+						ReturnFrame(_videoFrame);
+						_videoFrame = GetFrame();
+						continue;
+					}
+					if (ptr2->format != _loggedSwBgraFallbackFormat)
+					{
+						_loggedSwBgraFallbackFormat = ptr2->format;
+						SeekLog($"[SW_BGRA_FALLBACK] {_width}x{_height} format={ptr2->format} — GPU NV12 path unavailable");
+					}
+					decodedVideoFrame.BufferLayout = SwVideoBufferLayout.Bgra;
+					int bgraBytes = _width * _height * 4;
+					if (_swsBgraBufferSize < bgraBytes)
+					{
+						FreeSwsBgraPool();
+						for (int i = 0; i < SwsBgraPoolSize; i++)
+						{
+							_swsBgraPointers[i] = (IntPtr)NativeMemory.Alloc((nuint)bgraBytes);
+						}
+						_swsBgraBufferSize = bgraBytes;
 						if (_swsContext != null)
 						{
 							ffmpeg.sws_freeContext(_swsContext);
@@ -2679,7 +3630,6 @@ private unsafe AVCodecContext* _audioCodecContext;
 							_swsSrcFormat = AVPixelFormat.AV_PIX_FMT_NONE;
 						}
 					}
-					stopwatch2.Start();
 					AVPixelFormat srcPixelFormat = (AVPixelFormat)ptr2->format;
 					if (_swsContext == null || _swsSrcFormat != srcPixelFormat)
 					{
@@ -2688,8 +3638,11 @@ private unsafe AVCodecContext* _audioCodecContext;
 							ffmpeg.sws_freeContext(_swsContext);
 							_swsContext = null;
 						}
-						_swsContext = ffmpeg.sws_getContext(ptr2->width, ptr2->height, srcPixelFormat, _width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, 1, null, null, null);
+						int swsFlags = GetSwsFlags(ptr2->width, ptr2->height, _width, _height);
+						_swsContext = ffmpeg.sws_getContext(ptr2->width, ptr2->height, srcPixelFormat, _width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, swsFlags, null, null, null);
 						_swsSrcFormat = srcPixelFormat;
+						// Force re-apply of any brightness/contrast/saturation on freshly created context
+						_videoFiltersChanged = true;
 					}
 					if (_swsContext == null)
 					{
@@ -2722,49 +3675,46 @@ private unsafe AVCodecContext* _audioCodecContext;
 						}
 						_videoFiltersChanged = false;
 					}
-					_swsBgraBufferIndex = (_swsBgraBufferIndex + 1) % 6;
-					decodedVideoFrame.BgraBuffer = _swsBgraBuffers[_swsBgraBufferIndex];
-					decodedVideoFrame.BgraPointer = _swsBgraPointers[_swsBgraBufferIndex];
-					decodedVideoFrame.BgraHandle = default;
+
+					// Rotate pool and prepare destination using pre-allocated arrays (no 'new' per frame)
+					_swsBgraBufferIndex = (_swsBgraBufferIndex + 1) % SwsBgraPoolSize;
+					var bgraPtr = _swsBgraPointers[_swsBgraBufferIndex];
+					decodedVideoFrame.BgraPointer = bgraPtr;
+					decodedVideoFrame.Width = _width;
+					decodedVideoFrame.Height = _height;
 					decodedVideoFrame.SliceIndexOrStride = _width * 4;
-					ffmpeg.sws_scale(dst: new byte*[8]
+
+					if (_swsDstData == null)
 					{
-						(byte*)decodedVideoFrame.BgraPointer,
-						default(byte*),
-						default(byte*),
-						default(byte*),
-						default(byte*),
-						default(byte*),
-						default(byte*),
-						default(byte*)
-					}, dstStride: new int[8]
-					{
-						_width * 4,
-						0,
-						0,
-						0,
-						0,
-						0,
-						0,
-						0
-					}, c: _swsContext, srcSlice: ptr2->data, srcStride: ptr2->linesize, srcSliceY: 0, srcSliceH: ptr2->height);
+						_swsDstData = new byte*[8];
+						// strides remain zero except [0] which we overwrite every frame
+					}
+
+					_swsDstData[0] = (byte*)bgraPtr;
+					_swsDstStrides[0] = _width * 4;
+
+					// Use cached arrays to eliminate per-frame allocation in hot path
+					var swsTimer = Stopwatch.StartNew();
+					ffmpeg.sws_scale(dst: _swsDstData, dstStride: _swsDstStrides, c: _swsContext, srcSlice: ptr2->data, srcStride: ptr2->linesize, srcSliceY: 0, srcSliceH: ptr2->height);
+					swsTimer.Stop();
 					if (ptr3 != null)
 					{
 						ReturnFrame(ptr3);
 					}
-					stopwatch2.Stop();
-					_totalDecodeTimeMs += stopwatch2.Elapsed.TotalMilliseconds;
+
+					double swsMs = swsTimer.Elapsed.TotalMilliseconds;
+					_totalDecodeTimeMs += swsMs;
 					_decodeTimeSamples++;
-					_stats.SwsConvertTimeMs = stopwatch2.Elapsed.TotalMilliseconds;
+					_stats.SwsConvertTimeMs = swsMs;
 					ReturnFrame(_videoFrame);
 					_videoFrame = GetFrame();
+					}
 				}
 				int maxQueueSize = GetDecodedFrameQueueLimit();
 				if (!flag)
 				{
-					// Software BGRA frames use a small rotating pinned-buffer pool.
-					// Keep the queue below the pool size so queued frames are not overwritten before rendering.
-					maxQueueSize = Math.Min(maxQueueSize, 3);
+					// SW jitter buffer — large enough to absorb CPU spikes; pool is 16 slots.
+					maxQueueSize = Math.Min(maxQueueSize, GetSoftwareDecodedFrameQueueCap());
 				}
 				if (_decodedVideoQueue.Count >= maxQueueSize && _isRunning && !_isSeekingVideo)
 				{
@@ -2806,106 +3756,107 @@ private unsafe AVCodecContext* _audioCodecContext;
 					_decodeTimeSamples = 0;
 					_lastFpsCalcTime = utcNow;
 				}
-				double num10 = num5 / 1000.0;
-				double obj = num10 / num;
-				this.PositionChanged?.Invoke(obj);
-				this.TimeUpdated?.Invoke(TimeSpan.FromSeconds(num10), arg);
+				// UI timeline follows audio master (not video decode PTS — that raced to EOF at V.DecodeFPS).
+				if (_seekPhase == SeekPhase.None && !_suppressAudioOutput && _audioStreamIndex == -1)
+				{
+					double num10 = num5 / 1000.0;
+					double obj = num > 0 ? num10 / num : 0;
+					this.PositionChanged?.Invoke(obj);
+					this.TimeUpdated?.Invoke(TimeSpan.FromSeconds(num10), arg);
+				}
 			}
 		}
 		ThreadFinished();
 	}
 
-	private DecodedVideoFrame? DequeueSeekHoldPreviewFrame()
+	public bool TryPeekNextQueuedFramePts(out double ptsMs)
 	{
-		DecodedVideoFrame? tightFrame = null;
-		double tightAbsLeadMs = double.MaxValue;
-		DecodedVideoFrame? fallbackFrame = null;
-		double fallbackAbsLeadMs = double.MaxValue;
-		var deferred = new List<DecodedVideoFrame>(16);
-		int scanned = 0;
-		while (scanned++ < 40 && _decodedVideoQueue.TryDequeue(out DecodedVideoFrame? candidate))
+		if (_decodedVideoQueue.TryPeek(out DecodedVideoFrame? frame))
 		{
-			double leadMs = candidate.PtsTime - _seekTargetPtsTime;
-			if (leadMs < -12000.0)
-			{
-				candidate.Dispose();
-				continue;
-			}
-			double absLeadMs = Math.Abs(leadMs);
-			if (leadMs >= -300.0 && leadMs <= 80.0 && absLeadMs < tightAbsLeadMs)
-			{
-				tightFrame?.Dispose();
-				tightFrame = candidate;
-				tightAbsLeadMs = absLeadMs;
-				continue;
-			}
-			// Widen fallback to tolerate larger keyframe/control delay; pick closest even if lead large
-			if (leadMs >= -300.0 && absLeadMs < fallbackAbsLeadMs)
-			{
-				fallbackFrame?.Dispose();
-				fallbackFrame = candidate;
-				fallbackAbsLeadMs = absLeadMs;
-				continue;
-			}
-			deferred.Add(candidate);
+			ptsMs = frame.PtsTime;
+			return true;
 		}
-		DecodedVideoFrame? chosen = tightFrame;
-		if (chosen == null && fallbackFrame != null)
+		ptsMs = 0.0;
+		return false;
+	}
+
+	/// <summary>
+	/// Returns the first decoded frame after a completed seek, bypassing A/V pacing.
+	/// Safe to call while paused so the renderer can update the still image.
+	/// </summary>
+	public DecodedVideoFrame? TryPullPostSeekDisplayFrame()
+	{
+		if (_seekPhase == SeekPhase.Active || !_awaitingPostSeekVideoDisplay)
 		{
-			double fallbackLeadMs = fallbackFrame.PtsTime - _seekTargetPtsTime;
-			if (fallbackLeadMs <= SeekHoldMaxDisplayLeadMs)
-			{
-				chosen = fallbackFrame;
-			}
-			else
-			{
-				deferred.Add(fallbackFrame);
-				fallbackFrame = null;
-			}
+			return null;
 		}
-		if (chosen != tightFrame)
+		if (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? landFrame))
 		{
-			tightFrame?.Dispose();
+			MarkVideoFrameDisplayed(landFrame.PtsTime);
+			_awaitingPostSeekVideoDisplay = false;
+			_postSeekTargetMs = -1.0;
+			return landFrame;
 		}
-		if (chosen != fallbackFrame)
-		{
-			fallbackFrame?.Dispose();
-		}
-		foreach (DecodedVideoFrame frame in deferred)
-		{
-			_decodedVideoQueue.Enqueue(frame);
-		}
-		return chosen;
+		return null;
 	}
 
 	public DecodedVideoFrame? PullVideoFrame(double masterClockPts)
 	{
-		if (_seekClockHold)
+		DecodedVideoFrame? postSeekFrame = TryPullPostSeekDisplayFrame();
+		if (postSeekFrame != null)
 		{
-			TryFinalizeSeekPlayback();
+			return postSeekFrame;
 		}
-		double videoClockPts = masterClockPts + _avStartOffsetMs;
-		double frameIntervalMs = (_stats.TargetFps > 1.0) ? (1000.0 / _stats.TargetFps) : 40.0;
-		double lateThresholdMs = Math.Max(250.0, frameIntervalMs * 4.0);
-		double earlyThresholdMs = Math.Max(50.0, frameIntervalMs * 2.0);
-		if (DateTime.UtcNow.Ticks < _videoPrimeUntilUtcTicks)
+		if (_seekPhase == SeekPhase.Active)
 		{
-			lateThresholdMs = Math.Max(lateThresholdMs, 450.0);
+			return null;
 		}
 
-		if (_seekClockHold)
+		EnsurePlaybackClockStarted();
+
+		// === AUDIO IS THE ONLY MASTER ===
+		// Video may only present when its PTS is due on the audio playhead.
+		// Never present at V.DecodeFPS — that burns a 24fps stream at 32fps and ends 2min files at ~1.5min.
+		masterClockPts = GetMasterClockPts();
+		double streamOffset = GetAvStartOffsetMs(); // ~0 for muxed files
+		double targetVideoPts = masterClockPts + streamOffset;
+
+		double frameIntervalMs = (_stats.TargetFps > 1.0) ? (1000.0 / _stats.TargetFps) : 40.0;
+		// Hold early frames strictly; drop late only when we still have a spare frame.
+		double lateThresholdMs = Math.Max(80.0, frameIntervalMs * 2.5);
+		double earlyThresholdMs = Math.Max(20.0, frameIntervalMs * 0.75);
+
+		// First paint: optional SW prebuffer, then release audio. Do not free-run.
+		if (_lastDisplayedVideoPtsMs < 0.0)
 		{
-			DecodedVideoFrame? holdFrame = DequeueSeekHoldPreviewFrame();
-			if (holdFrame != null)
+			if (_isSoftwareVideoDecode && _decodedVideoQueue.Count < SwStartupMinDecodedFrames)
 			{
-				MarkVideoFrameDisplayed(holdFrame.PtsTime);
-				return holdFrame;
+				return null;
+			}
+			// Wait for audio clock if we already have audio (avoid stopwatch free-run).
+			if (_audioStreamIndex != -1 && _firstAudioPtsMs < 0.0 && !_suppressAudioOutput)
+			{
+				// Audio not clocked yet — still OK to show first frame and let audio catch.
+			}
+			if (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? bootstrapFrame))
+			{
+				MarkVideoFrameDisplayed(bootstrapFrame.PtsTime);
+				// Only seed stopwatch fallback; live pace uses audio playhead once available.
+				if (_audioStreamIndex == -1 || double.IsNaN(GetAudioPlayheadPts()))
+				{
+					SyncPlaybackClockToPts(bootstrapFrame.PtsTime - streamOffset);
+				}
+				return bootstrapFrame;
 			}
 			return null;
 		}
 
-		while (_decodedVideoQueue.TryPeek(out DecodedVideoFrame? lateCandidate)
-			&& lateCandidate.PtsTime < videoClockPts - lateThresholdMs
+		// Drop late frames (behind audio) while keeping at least one candidate.
+		int maxDrops = 12;
+		while (maxDrops-- > 0
+			&& _decodedVideoQueue.Count > 1
+			&& _decodedVideoQueue.TryPeek(out DecodedVideoFrame? lateCandidate)
+			&& lateCandidate.PtsTime < targetVideoPts - lateThresholdMs
 			&& _decodedVideoQueue.TryDequeue(out DecodedVideoFrame? lateFrame))
 		{
 			Interlocked.Increment(ref _droppedFrameCount);
@@ -2913,29 +3864,25 @@ private unsafe AVCodecContext* _audioCodecContext;
 			lateFrame.Dispose();
 		}
 
-		if (_decodedVideoQueue.TryPeek(out DecodedVideoFrame? dueCandidate)
-			&& dueCandidate.PtsTime <= videoClockPts + earlyThresholdMs
-			&& _decodedVideoQueue.TryDequeue(out DecodedVideoFrame? dueFrame))
+		if (!_decodedVideoQueue.TryPeek(out DecodedVideoFrame? head))
 		{
-			MarkVideoFrameDisplayed(dueFrame.PtsTime);
-			return dueFrame;
+			return null;
 		}
 
-		double primeWindowMs = 600.0;
-		if (DateTime.UtcNow.Ticks < _postSeekClockLockUntilUtcTicks)
+		double pts = head.PtsTime;
+
+		// EARLY: video ahead of audio → wait (this is how duration stays correct).
+		if (pts > targetVideoPts + earlyThresholdMs)
 		{
-			primeWindowMs = Math.Min(primeWindowMs, 120.0);
-		}
-		if (DateTime.UtcNow.Ticks < _videoPrimeUntilUtcTicks
-			&& _decodedVideoQueue.TryPeek(out DecodedVideoFrame? primeCandidate)
-			&& primeCandidate.PtsTime <= videoClockPts + primeWindowMs
-			&& primeCandidate.PtsTime >= videoClockPts - 80.0
-			&& _decodedVideoQueue.TryDequeue(out DecodedVideoFrame? primeFrame))
-		{
-			MarkVideoFrameDisplayed(primeFrame.PtsTime);
-			return primeFrame;
+			return null;
 		}
 
+		// Due or slightly late: show this frame.
+		if (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? presentFrame))
+		{
+			MarkVideoFrameDisplayed(presentFrame.PtsTime);
+			return presentFrame;
+		}
 		return null;
 	}
 
@@ -2943,25 +3890,47 @@ private unsafe AVCodecContext* _audioCodecContext;
 	{
 		if (Interlocked.Exchange(ref _isCleanedUp, 1) != 1)
 		{
-
-			for (int i = 0; i < 6; i++)
+			// Drain queues before releasing codec/format contexts (packets/frames must not outlive them).
+			while (_videoPacketQueue.TryDequeue(out IntPtr queuedVideoPacket))
 			{
-				if (_swsBgraHandles[i].IsAllocated)
-				{
-					_swsBgraHandles[i].Free();
-					_swsBgraHandles[i] = default(GCHandle);
-				}
+				AVPacket* pkt = (AVPacket*)queuedVideoPacket;
+				ffmpeg.av_packet_free(&pkt);
 			}
+			while (_audioPacketQueue.TryDequeue(out IntPtr queuedAudioPacket))
+			{
+				AVPacket* pkt = (AVPacket*)queuedAudioPacket;
+				ffmpeg.av_packet_free(&pkt);
+			}
+			while (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? decodedFrame))
+			{
+				decodedFrame.Dispose();
+			}
+			_videoPacketQueueSizeBytes = 0;
+			_audioPacketQueueSizeBytes = 0;
+
+			// Use centralized helper for SW BGRA pool (prevents duplication and ensures reset)
+			FreeSwsBgraPool();
+			FreeSwNv12Pool();
+
 			if (_audioBufferHandle.IsAllocated)
 			{
 				_audioBufferHandle.Free();
 				_audioBufferHandle = default(GCHandle);
 			}
+			_audioBufferPointer = IntPtr.Zero;
+			_audioBuffer = null;
+
 			if (_swsContext != null)
 			{
 				ffmpeg.sws_freeContext(_swsContext);
 				_swsContext = null;
 				_swsSrcFormat = AVPixelFormat.AV_PIX_FMT_NONE;
+			}
+			if (_swsNv12Context != null)
+			{
+				ffmpeg.sws_freeContext(_swsNv12Context);
+				_swsNv12Context = null;
+				_swsNv12SrcFormat = AVPixelFormat.AV_PIX_FMT_NONE;
 			}
 			if (_swrContext != null)
 			{
@@ -2969,6 +3938,10 @@ private unsafe AVCodecContext* _audioCodecContext;
 				ffmpeg.swr_free(&swrContext);
 				_swrContext = null;
 			}
+
+			// Reset key state to prevent dangling references on reuse
+			_swsBgraBufferIndex = 0;
+			_swsSrcFormat = AVPixelFormat.AV_PIX_FMT_NONE;
 			FreeAudioFilterGraph();
 			if (_filteredAudioFrame != null)
 			{
@@ -3000,58 +3973,47 @@ private unsafe AVCodecContext* _audioCodecContext;
 				ffmpeg.av_packet_free(&packet);
 				_packet = null;
 			}
-						IntPtr result;
-			while (_videoPacketQueue.TryDequeue(out result))
+
+			while (_packetPool.TryTake(out IntPtr pooledPacket))
 			{
-				ReturnPacket((AVPacket*)result);
+				AVPacket* pkt = (AVPacket*)pooledPacket;
+				ffmpeg.av_packet_free(&pkt);
 			}
-			DecodedVideoFrame result2;
-			while (_decodedVideoQueue.TryDequeue(out result2))
+			while (_framePool.TryTake(out IntPtr pooledFrame))
 			{
-				result2.Dispose();
+				AVFrame* frame = (AVFrame*)pooledFrame;
+				ffmpeg.av_frame_free(&frame);
 			}
-			IntPtr result3;
-			while (_audioPacketQueue.TryDequeue(out result3))
-			{
-				ReturnPacket((AVPacket*)result3);
-			}
-			IntPtr result4;
-			while (_packetPool.TryTake(out result4))
-			{
-				AVPacket* ptr = (AVPacket*)result4;
-				ffmpeg.av_packet_free(&ptr);
-			}
-			IntPtr result5;
-			while (_framePool.TryTake(out result5))
-			{
-				AVFrame* ptr2 = (AVFrame*)result5;
-				ffmpeg.av_frame_free(&ptr2);
-			}
+
 			if (_videoCodecContext != null)
 			{
-				AVCodecContext* videoCodecContext = _videoCodecContext;
-				ffmpeg.avcodec_free_context(&videoCodecContext);
+				ClearVideoHwDevice(_videoCodecContext);
+				AVCodecContext* videoCtx = _videoCodecContext;
+				ffmpeg.avcodec_free_context(&videoCtx);
 				_videoCodecContext = null;
 			}
 			if (_audioCodecContext != null)
 			{
-				AVCodecContext* audioCodecContext = _audioCodecContext;
-				ffmpeg.avcodec_free_context(&audioCodecContext);
+				AVCodecContext* audioCtx = _audioCodecContext;
+				ffmpeg.avcodec_free_context(&audioCtx);
 				_audioCodecContext = null;
-			}
-			if (_formatContext != null)
-			{
-				AVFormatContext* formatContext = _formatContext;
-				ffmpeg.avformat_close_input(&formatContext);
-				_formatContext = null;
 			}
 			if (_audioFormatContext != null)
 			{
-				AVFormatContext* audioFormatContext = _audioFormatContext;
-				ffmpeg.avformat_close_input(&audioFormatContext);
+				AVFormatContext* audioFmt = _audioFormatContext;
+				ffmpeg.avformat_close_input(&audioFmt);
 				_audioFormatContext = null;
 			}
+			if (_formatContext != null)
+			{
+				AVFormatContext* fmt = _formatContext;
+				ffmpeg.avformat_close_input(&fmt);
+				_formatContext = null;
+			}
 
+			_videoStreamIndex = -1;
+			_audioStreamIndex = -1;
+			_getFormatCallback = null;
 		}
 	}
 
@@ -3068,29 +4030,32 @@ private unsafe AVCodecContext* _audioCodecContext;
 		}
 		catch (Exception ex)
 		{
-			Logger.Error("Unhandled exception caught in FFmpegMediaDecoder empty catch block", ex);
+			Logger.Error("Stop failed during decoder dispose", ex);
 		}
-		int num = 0;
-		while ((Interlocked.CompareExchange(ref _activeThreads, 0, 0) > 0 || Interlocked.CompareExchange(ref _isOpening, 0, 0) == 1) && num < 5000)
+
+		JoinWorkerThreads(8000);
+		if (AreWorkerThreadsAlive())
 		{
-			Thread.Sleep(10);
-			num += 10;
+			Logger.Warn("Dispose: worker threads still alive after first join; retrying.");
+			Stop();
+			JoinWorkerThreads(4000);
 		}
-		if (Interlocked.CompareExchange(ref _activeThreads, 0, 0) > 0 || Interlocked.CompareExchange(ref _isOpening, 0, 0) == 1)
+
+		if (!AreWorkerThreadsAlive())
 		{
-			Logger.Warn("Decoder dispose timed out while FFmpeg work is still active; forcing cleanup.");
+			Interlocked.Exchange(ref _activeThreads, 0);
+			ForceCleanupIfNeeded();
+			_readThread = null;
+			_videoThread = null;
+			_audioThread = null;
+			DisposeSyncEvents();
 		}
-		try
+		else
 		{
-			Cleanup();
+			Logger.Warn("Dispose: worker threads still alive; deferring FFmpeg cleanup until background join completes.");
+			ScheduleDeferredCleanup();
 		}
-		catch (Exception ex2)
-		{
-			Logger.Error("Unhandled exception caught in FFmpegMediaDecoder empty catch block", ex2);
-		}
-		_videoPacketAvailableEvent.Dispose();
-		_audioPacketAvailableEvent.Dispose();
+
 		GC.SuppressFinalize(this);
 	}
 }
-

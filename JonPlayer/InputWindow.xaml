@@ -3,7 +3,8 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Open Network URL" Height="150" Width="400"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}">
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}"
+        Loaded="Window_Loaded">
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>

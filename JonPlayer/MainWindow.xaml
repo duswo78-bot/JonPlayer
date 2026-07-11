@@ -643,27 +643,33 @@
 
             <Rectangle x:Name="MouseLayer" Fill="#01000000" IsHitTestVisible="True" Margin="6" MouseLeftButtonDown="MouseLayer_MouseLeftButtonDown"/>
 
-            <Button x:Name="BtnPlayPausePip" HorizontalAlignment="Center" VerticalAlignment="Center" Width="56" Height="56" Style="{StaticResource KnobButton}" ToolTip="Play/Pause" Click="BtnPlayPause_Click" Visibility="Collapsed" Panel.ZIndex="90">
-                <Path x:Name="PlayPauseIconPathPip" Data="{StaticResource PlayIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="22" Height="22" Stretch="Uniform"/>
+            <!-- PIP toggle icon at top-left (PIP mode only, shown on hover) -->
+            <Button x:Name="BtnPipOverlay" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="6" Width="24" Height="24" Background="Transparent" BorderThickness="0" ToolTip="PIP Mode (P)" Click="BtnPip_Click" Panel.ZIndex="97" Visibility="Collapsed" Cursor="Hand">
+                <TextBlock Text="⧉" Foreground="White" FontSize="16" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,-2,0,0"/>
             </Button>
 
             <!-- PIP minimal controls (YouTube-like on hover) -->
-            <!-- Top-right close -->
-            <Border x:Name="PipTopBar" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="6" Background="#AA000000" CornerRadius="3" Padding="2" Panel.ZIndex="95" Visibility="Collapsed">
-                <Button x:Name="BtnClosePip" Width="20" Height="20" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="13" FontWeight="Bold" ToolTip="Close" Click="BtnClosePip_Click" Cursor="Hand" Content="✕" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+            <!-- Bottom-right: Mute (corner) - shown only on hover, simple white -->
+            <Button x:Name="BtnMutePip" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="6" Width="20" Height="20" Background="Transparent" BorderThickness="0" Foreground="White" ToolTip="Mute (M)" Click="BtnMute_Click" Panel.ZIndex="96" Visibility="Collapsed" Cursor="Hand">
+                <Path x:Name="MuteIconPathPip" Data="{StaticResource VolumeHighIcon}" Fill="White" Width="11" Height="11" Stretch="Uniform"/>
+            </Button>
+
+            <!-- Top-right close (simple, shown on hover) -->
+            <Border x:Name="PipTopBar" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="6" Background="Transparent" Padding="2" Panel.ZIndex="95" Visibility="Collapsed">
+                <Button x:Name="BtnClosePip" Width="20" Height="20" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="16" FontWeight="Bold" ToolTip="Close" Click="BtnClosePip_Click" Cursor="Hand" Content="✕" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
             </Border>
 
-            <!-- Bottom minimal bar: Prev / Mute / Next -->
-            <Border x:Name="PipBottomBar" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="6" Background="#AA000000" CornerRadius="10" Padding="4,2" Panel.ZIndex="95" Visibility="Collapsed">
+            <!-- Bottom bar: Prev / PlayPause / Next (simple white icons, no button bg, spaced) -->
+            <Border x:Name="PipBottomBar" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="6" Background="Transparent" Padding="4,2" Panel.ZIndex="95" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal">
-                    <Button x:Name="BtnPrevPip" Width="24" Height="24" Style="{StaticResource KnobButton}" ToolTip="Previous" Click="BtnPrev_Click" Margin="1,0">
-                        <Path Data="{StaticResource PrevIcon}" Fill="White" Width="11" Height="11" Stretch="Uniform"/>
+                    <Button x:Name="BtnPrevPip" Width="26" Height="26" Background="Transparent" BorderThickness="0" Foreground="White" ToolTip="Previous" Click="BtnPrev_Click" Margin="0,0,10,0" Cursor="Hand">
+                        <Path Data="{StaticResource PrevIcon}" Fill="White" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
-                    <Button x:Name="BtnMutePip" Width="24" Height="24" Style="{StaticResource KnobButton}" ToolTip="Mute (M)" Click="BtnMute_Click" Margin="1,0">
-                        <Path x:Name="MuteIconPathPip" Data="{StaticResource VolumeHighIcon}" Fill="White" Width="11" Height="11" Stretch="Uniform"/>
+                    <Button x:Name="BtnPlayPausePip" Width="26" Height="26" Background="Transparent" BorderThickness="0" Foreground="White" ToolTip="Play/Pause" Click="BtnPlayPause_Click" Margin="0,0,10,0" Cursor="Hand">
+                        <Path x:Name="PlayPauseIconPathPip" Data="{StaticResource PlayIcon}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
-                    <Button x:Name="BtnNextPip" Width="24" Height="24" Style="{StaticResource KnobButton}" ToolTip="Next" Click="BtnNext_Click" Margin="1,0">
-                        <Path Data="{StaticResource NextIcon}" Fill="White" Width="11" Height="11" Stretch="Uniform"/>
+                    <Button x:Name="BtnNextPip" Width="26" Height="26" Background="Transparent" BorderThickness="0" Foreground="White" ToolTip="Next" Click="BtnNext_Click" Margin="0,0,0,0" Cursor="Hand">
+                        <Path Data="{StaticResource NextIcon}" Fill="White" Width="14" Height="14" Stretch="Uniform"/>
                     </Button>
                 </StackPanel>
             </Border>
@@ -1077,11 +1083,11 @@
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="`" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="1" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
-                                            <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="2" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border x:Name="BadgeSize50" Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="`" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border x:Name="BadgeSize100" Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="1" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
+                                            <Border x:Name="BadgeSize200" Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="2" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="창 크기 50% / 100% / 200%" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        <TextBlock x:Name="TxtWindowSizePresets" Grid.Column="1" Text="창 크기 50% / 100% / 200% (현재 화면 기준)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -1095,7 +1101,7 @@
                                             <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" Margin="0,0,2,0"><TextBlock Text="←" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                             <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2"><TextBlock Text="→" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="5초 탐색 (Ctrl: 30s Jump)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        <TextBlock Grid.Column="1" Text="10초 탐색 (Ctrl: 30s Jump)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                     </Grid>
                                     <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -1171,7 +1177,7 @@
                                         
                                         <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                             <Border Background="{DynamicResource KeyBadgeBrush}" CornerRadius="4" Padding="4,2" HorizontalAlignment="Center"><TextBlock Text="H" Foreground="{DynamicResource KeyTextBrush}" FontWeight="Bold"/></Border>
-                                            <TextBlock Grid.Column="1" Text="HLSL 셰이더 비디오 필터" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                            <TextBlock Grid.Column="1" Text="HQ+ 향상 (채도·선명도 셰이더)" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                                         </Grid>
                                         <Grid Margin="0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -1348,28 +1354,57 @@
                             <Slider Grid.Column="2" x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="50" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
                             
                             <StackPanel Grid.Column="3" Orientation="Horizontal">
-                                <Button x:Name="BtnBassFS" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center">
-                                    <Button.Template>
-                                        <ControlTemplate TargetType="Button">
-                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
-                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
-                                            </Border>
-                                            <ControlTemplate.Triggers>
-                                                <Trigger Property="IsMouseOver" Value="True">
-                                                    <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
-                                                </Trigger>
-                                                <Trigger Property="Tag" Value="On">
-                                                    <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
-                                                    <Setter Property="Effect">
-                                                        <Setter.Value>
-                                                            <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
-                                                        </Setter.Value>
-                                                    </Setter>
-                                                </Trigger>
-                                            </ControlTemplate.Triggers>
-                                        </ControlTemplate>
-                                    </Button.Template>
-                                </Button>
+                                <!-- Compact HQ+ (video) / BASS+ (audio) stack — same footprint as single BASS+ -->
+                                <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
+                                    <Button x:Name="BtnHqFS" Style="{StaticResource TextToggleButton}" Content="HQ+" Click="BtnHq_Click"
+                                            ToolTip="Enhanced Video (H) — saturation &amp; sharpness" Height="15" FontSize="9" Padding="0" Margin="0,0,0,2"
+                                            VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                    </Trigger>
+                                                    <Trigger Property="Tag" Value="On">
+                                                        <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
+                                                        <Setter Property="Effect">
+                                                            <Setter.Value>
+                                                                <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                            </Setter.Value>
+                                                        </Setter>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <Button x:Name="BtnBassFS" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click"
+                                            ToolTip="Bass Boost (Shift+B)" Height="15" FontSize="9" Padding="0"
+                                            VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                    </Trigger>
+                                                    <Trigger Property="Tag" Value="On">
+                                                        <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
+                                                        <Setter Property="Effect">
+                                                            <Setter.Value>
+                                                                <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                            </Setter.Value>
+                                                        </Setter>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                </StackPanel>
                                 <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
                                     <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1" Cursor="Hand" MouseLeftButtonUp="SpeedLabel_MouseLeftButtonUp"/>
                                     <Button x:Name="BtnSpeedFS" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Speed" Click="BtnSpeed_Click" Margin="0,0,0,0">
@@ -1502,29 +1537,58 @@
                         <Slider Grid.Column="2" x:Name="SliderVolume" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="50" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,14,0"/>
                         
                         <StackPanel Grid.Column="3" Orientation="Horizontal">
-                            <Border Width="1" Height="20" Background="{DynamicResource DividerBrush}" Margin="0,0,14,0"/>
-                            <Button x:Name="BtnBass" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click" Margin="0,0,14,0" ToolTip="Bass Boost (Shift+B)" Height="20" VerticalAlignment="Center">
-                                <Button.Template>
-                                    <ControlTemplate TargetType="Button">
-                                        <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
-                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
-                                        </Border>
-                                        <ControlTemplate.Triggers>
-                                            <Trigger Property="IsMouseOver" Value="True">
-                                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
-                                            </Trigger>
-                                            <Trigger Property="Tag" Value="On">
-                                                <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
-                                                <Setter Property="Effect">
-                                                    <Setter.Value>
-                                                        <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
-                                                    </Setter.Value>
-                                                </Setter>
-                                            </Trigger>
-                                        </ControlTemplate.Triggers>
-                                    </ControlTemplate>
-                                </Button.Template>
-                            </Button>
+                            <Border Width="1" Height="28" Background="{DynamicResource DividerBrush}" Margin="0,0,12,0" VerticalAlignment="Center"/>
+                            <!-- Compact HQ+ (video) / BASS+ (audio) stack -->
+                            <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
+                                <Button x:Name="BtnHq" Style="{StaticResource TextToggleButton}" Content="HQ+" Click="BtnHq_Click"
+                                        ToolTip="Enhanced Video (H) — saturation &amp; sharpness" Height="15" FontSize="9" Padding="0" Margin="0,0,0,2"
+                                        VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                </Trigger>
+                                                <Trigger Property="Tag" Value="On">
+                                                    <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
+                                                    <Setter Property="Effect">
+                                                        <Setter.Value>
+                                                            <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                        </Setter.Value>
+                                                    </Setter>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+                                <Button x:Name="BtnBass" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click"
+                                        ToolTip="Bass Boost (Shift+B)" Height="15" FontSize="9" Padding="0"
+                                        VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                </Trigger>
+                                                <Trigger Property="Tag" Value="On">
+                                                    <Setter Property="Foreground" Value="{DynamicResource ToggleOnBrush}"/>
+                                                    <Setter Property="Effect">
+                                                        <Setter.Value>
+                                                            <DropShadowEffect Color="{DynamicResource ToggleOnGlowColor}" BlurRadius="6" ShadowDepth="0" Opacity="0.8"/>
+                                                        </Setter.Value>
+                                                    </Setter>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+                            </StackPanel>
                             <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
                                 <TextBlock Text="Speed" Foreground="{DynamicResource TextMutedBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,0,0,1" Cursor="Hand" MouseLeftButtonUp="SpeedLabel_MouseLeftButtonUp"/>
                                 <Button x:Name="BtnSpeed" Style="{StaticResource SpeedTextButton}" Content="1.0x ▾" ToolTip="Playback Speed" Click="BtnSpeed_Click" Margin="0,0,0,0">
