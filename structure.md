@@ -34,8 +34,8 @@ The core media engine responsible for reading and decoding media files.
   - Reads packets (`av_read_frame`).
   - Decodes them into frames (`avcodec_receive_frame`).
   - Converts frames into high-quality BGRA format using `sws_scale`.
-- **Synchronization**: Uses a `Stopwatch` and thread synchronization (`Monitor.Wait`) to perfectly match the decoded frame timestamps (PTS) with real-time playback, supporting variable playback speeds (e.g., 0.5x, 2.0x).
-- **Callbacks**: Fires events (`FrameDecoded`, `PositionChanged`, `TimeUpdated`, `PlaybackFinished`) to notify the UI and renderer.
+- **Synchronization**: Uses an **Audio Master Clock** to pace video presentation. Video frames are held or dropped based on the audio playhead, completely eliminating the need for an external Stopwatch. The shared container PTS perfectly syncs the streams.
+- **Callbacks**: Fires events (`FrameDecoded`, `PositionChanged`, `TimeUpdated`, `PlaybackFinished`) to notify the UI and renderer. Playback finishes only after audio queues are fully drained.
 
 ### `D3D11VideoRenderer.cs`
 The hardware-accelerated rendering component that connects FFmpeg to WPF.

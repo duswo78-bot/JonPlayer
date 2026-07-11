@@ -889,7 +889,7 @@ sequenceDiagram
   MW->>MW: ToggleMute — _lastVolume 저장, 0으로
 
   U->>MW: ↑/↓ (플레이리스트 닫힘 시)
-  MW->>MW: AdjustVolume ±5
+  MW->>MW: AdjustVolume ±5 (오디오 증폭량 OSD UI 업데이트)
 
   opt 전체화면
     MW->>MW: ShowFsVolumeOverlay (3초 자동 숨김)

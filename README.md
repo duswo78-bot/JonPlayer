@@ -12,13 +12,17 @@ A modern, high-performance media player built with C#, WPF, and FFmpeg. JonPlaye
 - **Audio & Video Support:** 
   - Wide format support powered by FFmpeg (MP4, MKV, AVI, MP3, WAV, FLAC, etc.).
   - Automatic extraction and display of embedded Cover Art (ID3 tags) for audio files, elegantly blurred into the background.
+  - **Audio Master Clock A/V Sync:** Video presentation is precisely paced by the audio playhead, ensuring perfect synchronization.
 - **Advanced Playback Controls:**
   - Highly responsive Seeking (Forward/Backward) perfectly synced between video and audio streams.
   - Playlist management (Auto-play next, Drag & Drop support).
   - Playback Speed Control (0.25x to 2.0x).
-  - Volume control with mute functionality.
+  - Volume & Audio Gain control with visual on-screen display.
   - State memory (automatically remembers and restores the last played media after finishing).
-- **Fullscreen & Multi-Monitor:** Intelligent fullscreen mode that properly fills the monitor where the window is currently located, with standard keyboard shortcuts.
+- **Subtitles & AI:**
+  - **On-Device AI Subtitles:** Whisper AI integration for automatic, offline subtitle generation.
+  - **Real-time Translation:** Instantly translate subtitles with smooth UI text transitions.
+- **Fullscreen & Multi-Monitor:** Intelligent fullscreen mode that properly fills the monitor where the window is currently located, with auto-hiding cursor and standard keyboard shortcuts.
 - **PIP, Streaming, & Shaders:**
   - **PIP (Picture-in-Picture):** Multi-tasking support with a floating video window.
   - **Streaming:** Support for network streaming protocols (RTSP, HLS, etc.).
