@@ -1354,14 +1354,14 @@
                             <Slider Grid.Column="2" x:Name="SliderVolumeFS" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="50" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,10,0"/>
                             
                             <StackPanel Grid.Column="3" Orientation="Horizontal">
-                                <!-- Compact HQ+ (video) / BASS+ (audio) stack — same footprint as single BASS+ -->
+                                <!-- HQ+ (video) / BASS+ (audio) — original toggle size stacked -->
                                 <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
                                     <Button x:Name="BtnHqFS" Style="{StaticResource TextToggleButton}" Content="HQ+" Click="BtnHq_Click"
-                                            ToolTip="Enhanced Video (H) — saturation &amp; sharpness" Height="15" FontSize="9" Padding="0" Margin="0,0,0,2"
+                                            ToolTip="Enhanced Video (H) — saturation &amp; sharpness" Height="20" Margin="0,0,0,3"
                                             VerticalAlignment="Center" HorizontalAlignment="Stretch">
                                         <Button.Template>
                                             <ControlTemplate TargetType="Button">
-                                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
                                                     <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
                                                 </Border>
                                                 <ControlTemplate.Triggers>
@@ -1381,11 +1381,11 @@
                                         </Button.Template>
                                     </Button>
                                     <Button x:Name="BtnBassFS" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click"
-                                            ToolTip="Bass Boost (Shift+B)" Height="15" FontSize="9" Padding="0"
+                                            ToolTip="Bass Boost (Shift+B)" Height="20"
                                             VerticalAlignment="Center" HorizontalAlignment="Stretch">
                                         <Button.Template>
                                             <ControlTemplate TargetType="Button">
-                                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                                <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
                                                     <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
                                                 </Border>
                                                 <ControlTemplate.Triggers>
@@ -1537,15 +1537,15 @@
                         <Slider Grid.Column="2" x:Name="SliderVolume" Style="{StaticResource VolumeSlider}" Minimum="0" Maximum="100" Value="50" IsMoveToPointEnabled="True" ValueChanged="SliderVolume_ValueChanged" VerticalAlignment="Center" Margin="0,0,14,0"/>
                         
                         <StackPanel Grid.Column="3" Orientation="Horizontal">
-                            <Border Width="1" Height="28" Background="{DynamicResource DividerBrush}" Margin="0,0,12,0" VerticalAlignment="Center"/>
-                            <!-- Compact HQ+ (video) / BASS+ (audio) stack -->
+                            <Border Width="1" Height="40" Background="{DynamicResource DividerBrush}" Margin="0,0,12,0" VerticalAlignment="Center"/>
+                            <!-- HQ+ (video) / BASS+ (audio) — original toggle size stacked -->
                             <StackPanel Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
                                 <Button x:Name="BtnHq" Style="{StaticResource TextToggleButton}" Content="HQ+" Click="BtnHq_Click"
-                                        ToolTip="Enhanced Video (H) — saturation &amp; sharpness" Height="15" FontSize="9" Padding="0" Margin="0,0,0,2"
+                                        ToolTip="Enhanced Video (H) — saturation &amp; sharpness" Height="20" Margin="0,0,0,3"
                                         VerticalAlignment="Center" HorizontalAlignment="Stretch">
                                     <Button.Template>
                                         <ControlTemplate TargetType="Button">
-                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
                                                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
                                             </Border>
                                             <ControlTemplate.Triggers>
@@ -1565,11 +1565,11 @@
                                     </Button.Template>
                                 </Button>
                                 <Button x:Name="BtnBass" Style="{StaticResource TextToggleButton}" Content="BASS+" Click="BtnBass_Click"
-                                        ToolTip="Bass Boost (Shift+B)" Height="15" FontSize="9" Padding="0"
+                                        ToolTip="Bass Boost (Shift+B)" Height="20"
                                         VerticalAlignment="Center" HorizontalAlignment="Stretch">
                                     <Button.Template>
                                         <ControlTemplate TargetType="Button">
-                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.2" CornerRadius="3" Padding="5,0" Background="Transparent">
+                                            <Border BorderBrush="{TemplateBinding Foreground}" BorderThickness="1.5" CornerRadius="4" Padding="6,0" Background="Transparent">
                                                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-1,0,0"/>
                                             </Border>
                                             <ControlTemplate.Triggers>

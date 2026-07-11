@@ -433,6 +433,17 @@ private unsafe AVCodecContext* _audioCodecContext;
 
 	private const double SeekAudioLeadToleranceMs = 50.0;
 
+	/// <summary>
+	/// FAST SEEK: land as soon as the latest decoded frame is within this many ms of the click.
+	/// 2000ms = snappy on long-GOP files with a moderate accuracy trade-off.
+	/// Trade-off: may start up to ~2s before the exact click (usually on/near a keyframe).
+	/// Use ~100 for frame-accurate (slower on long GOP).
+	/// </summary>
+	private const double SeekNearTargetMs = 2000.0;
+
+	/// <summary>Public toggle documentation: current build uses FAST SEEK (±2s land window).</summary>
+	public static bool FastSeekEnabled => true;
+
 	private volatile bool _suppressAudioOutput;
 
 	private volatile bool _awaitingPostSeekVideoDisplay;
@@ -585,6 +596,15 @@ private unsafe AVCodecContext* _audioCodecContext;
 	public bool IsPaused => _isPaused;
 
 	public bool IsSeekActive => _seekPhase == SeekPhase.Active;
+
+	/// <summary>True until the single post-seek land frame is shown and normal pacing resumes.</summary>
+	public bool IsAwaitingPostSeekDisplay => _awaitingPostSeekVideoDisplay;
+
+	/// <summary>
+	/// Seek in progress or waiting for near-target land: renderer freezes last frame (no intermediate draws).
+	/// </summary>
+	public bool ShouldHoldSeekVisual =>
+		_seekPhase == SeekPhase.Active || _awaitingPostSeekVideoDisplay;
 
 	public Func<double>? GetAudioBufferedDurationMs { get; set; }
 
@@ -1004,7 +1024,14 @@ private unsafe AVCodecContext* _audioCodecContext;
 		long streamSeekTimestamp = GetStreamSeekTimestamp(formatContext, streamIndex, targetMs);
 		if (streamSeekTimestamp != ffmpeg.AV_NOPTS_VALUE)
 		{
+			// Prefer keyframe seek (BACKWARD=1). Fast enough + decodable.
 			int num = ffmpeg.av_seek_frame(formatContext, streamIndex, streamSeekTimestamp, 1);
+			if (num >= 0)
+			{
+				return num;
+			}
+			// Fallback: ANY frame (can land closer on some containers; may need more decode work).
+			num = ffmpeg.av_seek_frame(formatContext, streamIndex, streamSeekTimestamp, 4); // AVSEEK_FLAG_ANY
 			if (num >= 0)
 			{
 				return num;
@@ -2739,38 +2766,12 @@ private unsafe AVCodecContext* _audioCodecContext;
 					{
 						ReturnPacket((AVPacket*)result);
 					}
-					// OPTIMIZATION: small forward seek -> PTS-based partial preserve of decoded frames.
-					// Avoids wasting work when user nudges the bar a little.
-					// Packet queues still fully cleared (compressed data not reusable).
-					double currentPos = _currentPlaybackPtsTime;
-					bool smallForwardSeek = (num > currentPos) && (num - currentPos < 5000.0);
-					if (smallForwardSeek)
+					// Always clear decoded video on seek. Keeping intermediate frames caused
+					// on-screen "fast forward" scrub between keyframe and the click target.
+					DecodedVideoFrame result2;
+					while (_decodedVideoQueue.TryDequeue(out result2))
 					{
-						var kept = new List<DecodedVideoFrame>();
-						DecodedVideoFrame f;
-						while (_decodedVideoQueue.TryDequeue(out f))
-						{
-							if (f.PtsTime >= num - 1000.0) // keep from ~1s before new target
-							{
-								kept.Add(f);
-							}
-							else
-							{
-								f.Dispose();
-							}
-						}
-						foreach (var k in kept)
-						{
-							_decodedVideoQueue.Enqueue(k);
-						}
-					}
-					else
-					{
-						DecodedVideoFrame result2;
-						while (_decodedVideoQueue.TryDequeue(out result2))
-						{
-							result2.Dispose();
-						}
+						result2.Dispose();
 					}
 					IntPtr result3;
 					while (_audioPacketQueue.TryDequeue(out result3))
@@ -3728,7 +3729,21 @@ private unsafe AVCodecContext* _audioCodecContext;
 				}
 				if (_isRunning && !_isSeekingVideo)
 				{
-					_decodedVideoQueue.Enqueue(decodedVideoFrame);
+					// During seek catch-up: keep ONLY the latest decoded frame (single still).
+					// Decode still walks keyframe→target for codec state, but we never queue a
+					// trail of intermediates that would flash on screen like a fast-forward.
+					if (_seekPhase == SeekPhase.Active || _awaitingPostSeekVideoDisplay)
+					{
+						while (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? prev))
+						{
+							prev.Dispose();
+						}
+						_decodedVideoQueue.Enqueue(decodedVideoFrame);
+					}
+					else
+					{
+						_decodedVideoQueue.Enqueue(decodedVideoFrame);
+					}
 				}
 				else
 				{
@@ -3781,8 +3796,8 @@ private unsafe AVCodecContext* _audioCodecContext;
 	}
 
 	/// <summary>
-	/// Returns the first decoded frame after a completed seek, bypassing A/V pacing.
-	/// Safe to call while paused so the renderer can update the still image.
+	/// ONE frame only: when seek is fully done and the kept "latest" decode is near the click target.
+	/// No intermediate frames (soft scrub was the same visual problem as FF). Catch-up is invisible.
 	/// </summary>
 	public DecodedVideoFrame? TryPullPostSeekDisplayFrame()
 	{
@@ -3790,24 +3805,39 @@ private unsafe AVCodecContext* _audioCodecContext;
 		{
 			return null;
 		}
-		if (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? landFrame))
+		if (!_decodedVideoQueue.TryPeek(out DecodedVideoFrame? peek))
 		{
-			MarkVideoFrameDisplayed(landFrame.PtsTime);
-			_awaitingPostSeekVideoDisplay = false;
-			_postSeekTargetMs = -1.0;
-			return landFrame;
+			return null;
 		}
-		return null;
+
+		double seekTarget = _postSeekTargetMs >= 0.0 ? _postSeekTargetMs : _seekRequestedMs;
+		// Wait silently until the single queued frame is near the user click (latest-only queue).
+		if (seekTarget >= 0.0 && peek.PtsTime < seekTarget - SeekNearTargetMs)
+		{
+			return null;
+		}
+
+		if (!_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? landFrame))
+		{
+			return null;
+		}
+		while (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? extra))
+		{
+			extra.Dispose();
+		}
+
+		MarkVideoFrameDisplayed(landFrame.PtsTime);
+		_awaitingPostSeekVideoDisplay = false;
+		_postSeekTargetMs = -1.0;
+		SyncPlaybackClockToPts(landFrame.PtsTime - GetAvStartOffsetMs());
+		SeekLog($"[SEEK_LAND] pts={landFrame.PtsTime:F0} target={seekTarget:F0}");
+		return landFrame;
 	}
 
 	public DecodedVideoFrame? PullVideoFrame(double masterClockPts)
 	{
-		DecodedVideoFrame? postSeekFrame = TryPullPostSeekDisplayFrame();
-		if (postSeekFrame != null)
-		{
-			return postSeekFrame;
-		}
-		if (_seekPhase == SeekPhase.Active)
+		// During seek/catch-up: no normal presents (renderer freezes last frame until land).
+		if (ShouldHoldSeekVisual)
 		{
 			return null;
 		}
@@ -3815,33 +3845,27 @@ private unsafe AVCodecContext* _audioCodecContext;
 		EnsurePlaybackClockStarted();
 
 		// === AUDIO IS THE ONLY MASTER ===
-		// Video may only present when its PTS is due on the audio playhead.
-		// Never present at V.DecodeFPS — that burns a 24fps stream at 32fps and ends 2min files at ~1.5min.
 		masterClockPts = GetMasterClockPts();
-		double streamOffset = GetAvStartOffsetMs(); // ~0 for muxed files
+		double streamOffset = GetAvStartOffsetMs();
 		double targetVideoPts = masterClockPts + streamOffset;
 
 		double frameIntervalMs = (_stats.TargetFps > 1.0) ? (1000.0 / _stats.TargetFps) : 40.0;
-		// Hold early frames strictly; drop late only when we still have a spare frame.
 		double lateThresholdMs = Math.Max(80.0, frameIntervalMs * 2.5);
 		double earlyThresholdMs = Math.Max(20.0, frameIntervalMs * 0.75);
+		// Never *display* frames more than this behind audio — that was the FF scrub
+		// (each late frame shown at decode rate while catching up after seek / stall).
+		double maxShowLateMs = Math.Max(200.0, frameIntervalMs * 5.0);
 
-		// First paint: optional SW prebuffer, then release audio. Do not free-run.
+		// First paint (file open only — post-seek handled above).
 		if (_lastDisplayedVideoPtsMs < 0.0)
 		{
 			if (_isSoftwareVideoDecode && _decodedVideoQueue.Count < SwStartupMinDecodedFrames)
 			{
 				return null;
 			}
-			// Wait for audio clock if we already have audio (avoid stopwatch free-run).
-			if (_audioStreamIndex != -1 && _firstAudioPtsMs < 0.0 && !_suppressAudioOutput)
-			{
-				// Audio not clocked yet — still OK to show first frame and let audio catch.
-			}
 			if (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? bootstrapFrame))
 			{
 				MarkVideoFrameDisplayed(bootstrapFrame.PtsTime);
-				// Only seed stopwatch fallback; live pace uses audio playhead once available.
 				if (_audioStreamIndex == -1 || double.IsNaN(GetAudioPlayheadPts()))
 				{
 					SyncPlaybackClockToPts(bootstrapFrame.PtsTime - streamOffset);
@@ -3851,17 +3875,30 @@ private unsafe AVCodecContext* _audioCodecContext;
 			return null;
 		}
 
-		// Drop late frames (behind audio) while keeping at least one candidate.
-		int maxDrops = 12;
+		// Silent catch-up: drop ALL frames that are too far behind audio (including the last).
+		// Presenting them one-by-one at decode FPS is what looked like fast-forward.
+		int maxDrops = 64;
 		while (maxDrops-- > 0
-			&& _decodedVideoQueue.Count > 1
 			&& _decodedVideoQueue.TryPeek(out DecodedVideoFrame? lateCandidate)
-			&& lateCandidate.PtsTime < targetVideoPts - lateThresholdMs
+			&& lateCandidate.PtsTime < targetVideoPts - maxShowLateMs
 			&& _decodedVideoQueue.TryDequeue(out DecodedVideoFrame? lateFrame))
 		{
 			Interlocked.Increment(ref _droppedFrameCount);
 			Interlocked.Increment(ref _lateFrameCount);
 			lateFrame.Dispose();
+		}
+
+		// Mild late drop of extras within the show window (keep pace, spare one).
+		maxDrops = 12;
+		while (maxDrops-- > 0
+			&& _decodedVideoQueue.Count > 1
+			&& _decodedVideoQueue.TryPeek(out DecodedVideoFrame? mildLate)
+			&& mildLate.PtsTime < targetVideoPts - lateThresholdMs
+			&& _decodedVideoQueue.TryDequeue(out DecodedVideoFrame? dropMild))
+		{
+			Interlocked.Increment(ref _droppedFrameCount);
+			Interlocked.Increment(ref _lateFrameCount);
+			dropMild.Dispose();
 		}
 
 		if (!_decodedVideoQueue.TryPeek(out DecodedVideoFrame? head))
@@ -3871,13 +3908,18 @@ private unsafe AVCodecContext* _audioCodecContext;
 
 		double pts = head.PtsTime;
 
-		// EARLY: video ahead of audio → wait (this is how duration stays correct).
+		// Still too far behind: hold last picture (no scrub).
+		if (pts < targetVideoPts - maxShowLateMs)
+		{
+			return null;
+		}
+
+		// EARLY: video ahead of audio → wait.
 		if (pts > targetVideoPts + earlyThresholdMs)
 		{
 			return null;
 		}
 
-		// Due or slightly late: show this frame.
 		if (_decodedVideoQueue.TryDequeue(out DecodedVideoFrame? presentFrame))
 		{
 			MarkVideoFrameDisplayed(presentFrame.PtsTime);

@@ -171,7 +171,8 @@ public class D3D11VideoRenderer : IDisposable
 
 	public void ClearDisplay() => PresentBlack();
 
-	public void PrepareForSeek() => PresentBlack();
+	/// <summary>Do not clear to black — freeze last frame for smoother seek transitions.</summary>
+	public void PrepareForSeek() => ResetPresentationPacing();
 
 	/// <summary>
 	/// Stop the render thread from pulling frames. Must run before decoder.Stop/Dispose
@@ -489,9 +490,40 @@ public class D3D11VideoRenderer : IDisposable
 				}
 				try
 				{
+					// Seek: freeze whatever is already on screen (no black, no scrub).
+					// Only swap once when near-target land frame is ready.
+					if (decoder.ShouldHoldSeekVisual)
+					{
+						FFmpegMediaDecoder.DecodedVideoFrame? land = decoder.TryPullPostSeekDisplayFrame();
+						if (land != null)
+						{
+							try
+							{
+								if (_isDisposed || _decoder == null)
+								{
+									land.Dispose();
+								}
+								else
+								{
+									RenderFrameInternal(land);
+									_swapChain?.Present(0u, PresentFlags.None);
+									_lastPresentUtc = DateTime.UtcNow;
+									_lastRenderedFrame?.Dispose();
+									_lastRenderedFrame = land;
+								}
+							}
+							catch (Exception)
+							{
+								land.Dispose();
+							}
+						}
+						// else: do nothing — previous frame stays visible (frozen), no redraw scrub
+						Thread.Sleep(8);
+						continue;
+					}
+
 					if (decoder.IsPaused)
 					{
-						// Seek-while-paused: still present the post-seek land frame (no pacing).
 						FFmpegMediaDecoder.DecodedVideoFrame? pausedSeekFrame = decoder.TryPullPostSeekDisplayFrame();
 						if (pausedSeekFrame != null)
 						{
@@ -1001,29 +1033,42 @@ public class D3D11VideoRenderer : IDisposable
 		// Stop pulling frames first, then signal loop exit and join before freeing D3D objects.
 		_decoder = null;
 		_isDisposed = true;
-		_renderThread?.Join(5000);
+		try
+		{
+			if (_renderThread != null && _renderThread.IsAlive)
+			{
+				if (!_renderThread.Join(3000))
+				{
+					System.Diagnostics.Debug.WriteLine("[D3D11VideoRenderer] render thread join timeout on dispose");
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			System.Diagnostics.Debug.WriteLine($"[D3D11VideoRenderer] join: {ex.Message}");
+		}
 		lock (_renderLock)
 		{
-			DisposeFrameResourcesUnlocked();
-			_vertexShader?.Dispose();
-			_pixelShader?.Dispose();
-			_enhancedPixelShader?.Dispose();
-			_4kEnhancedPixelShader?.Dispose();
-			_rgbPixelShader?.Dispose();
-			_enhancedRgbPixelShader?.Dispose();
-			_4kEnhancedRgbPixelShader?.Dispose();
-			_samplerState?.Dispose();
-			_renderTargetView?.Dispose();
-			_d3d11DecodeTexture?.Dispose();
-			_swYTexture?.Dispose();
-			_swUvTexture?.Dispose();
-			_bgraTexture?.Dispose();
-			_srvY?.Dispose();
-			_srvUV?.Dispose();
-			_swSrvY?.Dispose();
-			_swSrvUv?.Dispose();
-			_bgraSrv?.Dispose();
-			_swapChain?.Dispose();
+			try { DisposeFrameResourcesUnlocked(); } catch { }
+			try { _vertexShader?.Dispose(); } catch { }
+			try { _pixelShader?.Dispose(); } catch { }
+			try { _enhancedPixelShader?.Dispose(); } catch { }
+			try { _4kEnhancedPixelShader?.Dispose(); } catch { }
+			try { _rgbPixelShader?.Dispose(); } catch { }
+			try { _enhancedRgbPixelShader?.Dispose(); } catch { }
+			try { _4kEnhancedRgbPixelShader?.Dispose(); } catch { }
+			try { _samplerState?.Dispose(); } catch { }
+			try { _renderTargetView?.Dispose(); } catch { }
+			try { _d3d11DecodeTexture?.Dispose(); } catch { }
+			try { _swYTexture?.Dispose(); } catch { }
+			try { _swUvTexture?.Dispose(); } catch { }
+			try { _bgraTexture?.Dispose(); } catch { }
+			try { _srvY?.Dispose(); } catch { }
+			try { _srvUV?.Dispose(); } catch { }
+			try { _swSrvY?.Dispose(); } catch { }
+			try { _swSrvUv?.Dispose(); } catch { }
+			try { _bgraSrv?.Dispose(); } catch { }
+			try { _swapChain?.Dispose(); } catch { }
 			_renderTargetView = null;
 			_d3d11DecodeTexture = null;
 			_bgraTexture = null;
@@ -1031,11 +1076,11 @@ public class D3D11VideoRenderer : IDisposable
 			_srvUV = null;
 			_bgraSrv = null;
 			_swapChain = null;
-			_d3d11Context?.Dispose();
-			_d3d11Device?.Dispose();
+			try { _d3d11Context?.Dispose(); } catch { }
+			try { _d3d11Device?.Dispose(); } catch { }
 			_d3d11Context = null;
 			_d3d11Device = null;
-			_lastRenderedFrame?.Dispose();
+			try { _lastRenderedFrame?.Dispose(); } catch { }
 			_lastRenderedFrame = null;
 		}
 	}

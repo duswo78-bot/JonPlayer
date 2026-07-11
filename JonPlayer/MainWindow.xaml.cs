@@ -521,16 +521,16 @@ namespace JonPlayer
                 _pendingPlaylistTarget = null;
 
                 // Stop all timers first to prevent null reference after disposal
-                _fsMousePollTimer.Stop();
-                _statsTimer.Stop();
-                _toastTimer.Stop();
-                _cursorHideTimer.Stop();
-                _fsVolumeTimer.Stop();
-                _notesTimer.Stop();
-                _playlistTimer?.Stop();
-                _timelineTimer.Stop();
-                _preciseTimelineTimer?.Stop();
-                _preciseTimelineTimer?.Dispose();
+                try { _fsMousePollTimer.Stop(); } catch { }
+                try { _statsTimer.Stop(); } catch { }
+                try { _toastTimer.Stop(); } catch { }
+                try { _cursorHideTimer.Stop(); } catch { }
+                try { _fsVolumeTimer.Stop(); } catch { }
+                try { _notesTimer.Stop(); } catch { }
+                try { _playlistTimer?.Stop(); } catch { }
+                try { _timelineTimer.Stop(); } catch { }
+                try { _preciseTimelineTimer?.Stop(); } catch { }
+                try { _preciseTimelineTimer?.Dispose(); } catch { }
                 _preciseTimelineTimer = null;
                 if (_timelineRenderingHooked)
                 {
@@ -540,18 +540,46 @@ namespace JonPlayer
 
                 CancelWhisperExtraction();
                 StopStreamingLoadingBlink();
-                if (_decoder != null)
+
+                // CRITICAL order for exit: detach render from decoder BEFORE disposing FFmpeg.
+                // Old order (decoder Dispose while render thread still PullVideoFrame) → 0xC0000005.
+                try { _waveOut?.Stop(); } catch { }
+                try { _waveProvider?.ClearBuffer(); } catch { }
+
+                var dec = _decoder;
+                _decoder = null;
+                if (dec != null)
                 {
-                    DetachDecoderEvents(_decoder);
-                    _decoder.Stop();
-                    _decoder.Dispose();
-                    _decoder = null;
+                    try { DetachDecoderEvents(dec); } catch { }
                 }
-                _waveOut?.Stop();
-                _waveOut?.Dispose();
-                _renderer?.Dispose();
+
+                var ren = _renderer;
                 _renderer = null;
-                timeEndPeriod(1);
+                if (ren != null)
+                {
+                    try
+                    {
+                        ren.DetachDecoder();
+                        ren.PrepareForDecoderTeardown();
+                    }
+                    catch { }
+                }
+
+                if (dec != null)
+                {
+                    try { dec.Stop(); } catch { }
+                    try { dec.Dispose(); } catch { }
+                }
+
+                try { _waveOut?.Dispose(); } catch { }
+                _waveOut = null;
+
+                if (ren != null)
+                {
+                    try { ren.Dispose(); } catch { }
+                }
+
+                try { timeEndPeriod(1); } catch { }
             };
         }
 
