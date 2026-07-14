@@ -1,3 +1,0 @@
-System.NullReferenceException: Object reference not set to an instance of an object.
-   at JonPlayer.MainWindow..ctor() in C:\Users\djw7ql\OneDrive - Aptiv\Antigravity\JonPlayer\JonPlayer\MainWindow.xaml.cs:line 331
-   at TestCrash.Program.Main(String[] args) in C:\Users\djw7ql\OneDrive - Aptiv\Antigravity\JonPlayer\TestCrash\Program.cs:line 13
