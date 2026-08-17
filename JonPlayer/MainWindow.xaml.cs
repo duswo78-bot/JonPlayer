@@ -4,6 +4,8 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
 using System.Windows;
+using System.Text.Json;
+using AutoUpdaterDotNET;
 using YoutubeExplode.Videos.Streams;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -278,8 +280,13 @@ namespace JonPlayer
         private DispatcherTimer _cursorHideTimer;
         private DispatcherTimer _fsVolumeTimer;
         private DispatcherTimer _notesTimer;
+        private DispatcherTimer _bassHoldTimer;
         private Random _notesRandom = new Random();
         private string[] _musicNotes = { "♩", "♪", "♫", "♬", "♭", "♮", "♯" };
+        private WpfButton? _activeBassHoldButton;
+        private bool _bassHoldTriggered;
+        private const string BassTagOn = "On";
+        private const string BassTagMax = "Max";
 
         private readonly string[] _idleVibes = new string[]
         {
@@ -425,6 +432,7 @@ namespace JonPlayer
             {
                 SetupOverlayWindow();
                 CheckRegistrationAndWhisper();
+                CheckForUpdates();
 
                 var args = Environment.GetCommandLineArgs();
                 if (args.Length > 1)
@@ -443,7 +451,6 @@ namespace JonPlayer
                 UpdateWindowSizePresetUi();
             };
             this.SizeChanged += (s, e) => SyncOverlayWindowToMainWindow();
-            
             // Hook global thread messages to reliably capture shortcuts even if focus is lost or HwndHost steals it
             System.Windows.Interop.ComponentDispatcher.ThreadPreprocessMessage += ComponentDispatcher_ThreadPreprocessMessage;
 
@@ -488,6 +495,9 @@ namespace JonPlayer
 
             _notesTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
             _notesTimer.Tick += NotesTimer_Tick;
+
+            _bassHoldTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _bassHoldTimer.Tick += BassHoldTimer_Tick;
 
             _lastCpuTime = Process.GetCurrentProcess().TotalProcessorTime;
             _lastCpuCheckTime = DateTime.UtcNow;
@@ -614,6 +624,59 @@ namespace JonPlayer
             Window_PreviewKeyDown(this, args);
             if (args.Handled) handled = true;
         }
+        private void CheckForUpdates()
+        {
+            try
+            {
+                AutoUpdater.ParseUpdateInfoEvent += (args) =>
+                {
+                    try
+                    {
+                        using JsonDocument doc = JsonDocument.Parse(args.RemoteData);
+                        JsonElement root = doc.RootElement;
+                        string tagName = root.GetProperty("tag_name").GetString();
+                        string releaseUrl = root.GetProperty("html_url").GetString();
+                        string downloadUrl = string.Empty;
+
+                        if (root.TryGetProperty("assets", out JsonElement assets) && assets.GetArrayLength() > 0)
+                        {
+                            foreach (JsonElement asset in assets.EnumerateArray())
+                            {
+                                string name = asset.GetProperty("name").GetString();
+                                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    downloadUrl = asset.GetProperty("browser_download_url").GetString();
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(tagName) && tagName.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+                        {
+                            tagName = tagName.Substring(1);
+                        }
+
+                        args.UpdateInfo = new UpdateInfoEventArgs
+                        {
+                            CurrentVersion = tagName,
+                            ChangelogURL = releaseUrl,
+                            DownloadURL = downloadUrl,
+                            Mandatory = new Mandatory { Value = false }
+                        };
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Failed to parse GitHub update info: {ex}");
+                    }
+                };
+
+                AutoUpdater.Start("https://api.github.com/repos/duswo78-bot/JonPlayer/releases/latest");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to start AutoUpdater: {ex}");
+            }
+        }
 
         private void SetupOverlayWindow()
         {
@@ -646,6 +709,7 @@ namespace JonPlayer
                 ShowInTaskbar = false,
                 Owner = this,
                 Content = mainGrid,
+                AllowDrop = true,
                 Width = double.IsNaN(this.Width) ? 800 : this.Width + 2,
                 Height = double.IsNaN(this.Height) ? 450 : this.Height + 2,
                 MinWidth = this.MinWidth + 2,
@@ -1460,7 +1524,24 @@ namespace JonPlayer
             if (!e.Data.GetDataPresent(System.Windows.DataFormats.FileDrop)) return;
             var files = e.Data.GetData(System.Windows.DataFormats.FileDrop) as string[];
             if (files == null || files.Length == 0) return;
-            LoadPlaylist(files);
+            
+            var allFiles = new System.Collections.Generic.List<string>();
+            foreach (var f in files)
+            {
+                if (System.IO.Directory.Exists(f))
+                {
+                    try
+                    {
+                        allFiles.AddRange(System.IO.Directory.GetFiles(f, "*.*", System.IO.SearchOption.AllDirectories));
+                    }
+                    catch { /* ignore access exceptions */ }
+                }
+                else
+                {
+                    allFiles.Add(f);
+                }
+            }
+            LoadPlaylist(allFiles.ToArray());
         }
 
         private string? _currentFilePath;
@@ -2959,22 +3040,97 @@ namespace JonPlayer
                 // is disposed while its token is still being observed by the native process thread.
             }
         }
+
+        private int GetBassEnhancementLevel()
+        {
+            string? tag = BtnBass?.Tag?.ToString() ?? BtnBassFS?.Tag?.ToString();
+            return tag switch
+            {
+                BassTagOn => AudioEnhancerProvider.EnhancementNormal,
+                BassTagMax => AudioEnhancerProvider.EnhancementMax,
+                _ => AudioEnhancerProvider.EnhancementOff,
+            };
+        }
+
+        private void ApplyBassEnhancementLevel(int level, bool showToast = true)
+        {
+            string? tag = level switch
+            {
+                AudioEnhancerProvider.EnhancementNormal => BassTagOn,
+                AudioEnhancerProvider.EnhancementMax => BassTagMax,
+                _ => null,
+            };
+
+            if (BtnBass != null) BtnBass.Tag = tag;
+            if (BtnBassFS != null) BtnBassFS.Tag = tag;
+            if (_audioEnhancer != null) _audioEnhancer.EnhancementLevel = level;
+
+            if (!showToast) return;
+
+            string message = level switch
+            {
+                AudioEnhancerProvider.EnhancementNormal => "Bass Boost: ON",
+                AudioEnhancerProvider.EnhancementMax => "Bass Boost: MAX",
+                _ => "Bass Boost: OFF",
+            };
+            ShowToast(message);
+        }
+
+        private void StopBassHoldTracking()
+        {
+            _bassHoldTimer?.Stop();
+            _activeBassHoldButton = null;
+        }
+
+        private void BassHoldTimer_Tick(object? sender, EventArgs e)
+        {
+            _bassHoldTimer.Stop();
+            if (_activeBassHoldButton?.IsPressed != true) return;
+
+            _bassHoldTriggered = true;
+            ApplyBassEnhancementLevel(AudioEnhancerProvider.EnhancementMax);
+        }
+
+        private void BtnBass_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            _bassHoldTriggered = false;
+            _activeBassHoldButton = sender as WpfButton;
+            _bassHoldTimer.Stop();
+            _bassHoldTimer.Start();
+        }
+
+        private void BtnBass_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            StopBassHoldTracking();
+        }
+
+        private void BtnBass_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (ReferenceEquals(_activeBassHoldButton, sender))
+            {
+                StopBassHoldTracking();
+            }
+        }
+
         private void BtnBass_Click(object sender, RoutedEventArgs e)
         {
-            if (BtnBass.Tag?.ToString() == "On")
+            StopBassHoldTracking();
+
+            if (_bassHoldTriggered)
             {
-                BtnBass.Tag = null;
-                if (BtnBassFS != null) BtnBassFS.Tag = null;
-                if (_audioEnhancer != null) _audioEnhancer.IsEnhancerEnabled = false;
-                ShowToast("Bass Boost: OFF");
+                _bassHoldTriggered = false;
+                return;
             }
-            else
-            {
-                BtnBass.Tag = "On";
-                if (BtnBassFS != null) BtnBassFS.Tag = "On";
-                if (_audioEnhancer != null) _audioEnhancer.IsEnhancerEnabled = true;
-                ShowToast("Bass Boost: ON");
-            }
+
+            int nextLevel = GetBassEnhancementLevel() == AudioEnhancerProvider.EnhancementOff
+                ? AudioEnhancerProvider.EnhancementNormal
+                : AudioEnhancerProvider.EnhancementOff;
+            ApplyBassEnhancementLevel(nextLevel);
+        }
+
+        private void ResetBassBoostToOff()
+        {
+            ApplyBassEnhancementLevel(AudioEnhancerProvider.EnhancementOff, showToast: false);
         }
 
         private void BtnHq_Click(object sender, RoutedEventArgs e) => ToggleEnhancedShader();
@@ -4496,7 +4652,7 @@ namespace JonPlayer
                     if (isShift && !_isPipMode) { SubtitleTransform.X -= 10; e.Handled = true; }
                     break;
                 case Key.R:
-                    if (isShift && _decoder != null) { _decoder.SetAudioFilters(1.0, 0.0); if (_audioEnhancer != null) _audioEnhancer.IsEnhancerEnabled = false; ShowToast("Audio Filters Reset"); e.Handled = true; }
+                    if (isShift && _decoder != null) { _decoder.SetAudioFilters(1.0, 0.0); ResetBassBoostToOff(); ShowToast("Audio Filters Reset"); e.Handled = true; }
                     break;
                 case Key.F:
                     if (!isCtrl && !isShift) { FitScreen(); e.Handled = true; }
